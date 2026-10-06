@@ -185,11 +185,15 @@ def cmd_validate(args) -> int:
 # ---------------------------------------------------------------- backtest
 def cmd_backtest(args) -> int:
     from .backtest import run_backtest
+    from .runtime import diagnose, format_diagnostic
 
     _setup_logging(args.verbose)
     root = Path(args.repo) if args.repo else default_repo_root()
     paths = default_user_data_layout(root)
     pairs = _parse_pairs(args.pairs)
+
+    # We are (post re-exec) on the selected runtime; show exactly what will run.
+    print(format_diagnostic(diagnose(root)))
 
     stake = args.stake
     if stake != "unlimited":
@@ -240,6 +244,21 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- doctor
+def cmd_doctor(args) -> int:
+    """Print the runtime diagnostic for the selected Freqtrade repo."""
+    _setup_logging(args.verbose)
+    from .runtime import AdapterRuntimeError, diagnose, format_diagnostic
+
+    repo = Path(args.repo) if args.repo else None
+    try:
+        print(format_diagnostic(diagnose(repo)))
+    except AdapterRuntimeError as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 # ---------------------------------------------------------------- ui
 def cmd_ui(args) -> int:
     _setup_logging(args.verbose)
@@ -247,7 +266,14 @@ def cmd_ui(args) -> int:
 
     from .webui.app import create_app
 
-    app = create_app()
+    # The GUI always knows which Freqtrade repo it is bound to (default: auto).
+    # Backtest jobs run as a subprocess that re-execs into that repo's .venv.
+    root = Path(args.repo) if args.repo else None
+    app = create_app(root=root)
+
+    from .runtime import diagnose, format_diagnostic
+
+    print(format_diagnostic(diagnose(root)))
     print(f"Nobitex Backtest Manager UI  ->  http://{args.host}:{args.port}")
     print("BACKTEST / MARKET DATA MODE - NO REAL ORDERS")
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
@@ -270,7 +296,11 @@ def cmd_mock(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="nobitex", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--repo", default=None, help="repository root (default: auto)")
+    p.add_argument(
+        "--repo", default=None,
+        help="Freqtrade repository root containing .venv + user_data "
+             "(default: auto = the adapter checkout)",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -325,12 +355,33 @@ def build_parser() -> argparse.ArgumentParser:
     pmk.add_argument("--port", type=int, default=8900)
     pmk.set_defaults(func=cmd_mock)
 
+    pd_ = sub.add_parser("doctor", help="print the runtime diagnostic for --repo")
+    pd_.set_defaults(func=cmd_doctor)
+
     return p
+
+
+# commands that must run inside the SELECTED Freqtrade runtime
+RUNTIME_COMMANDS = {"backtest"}
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Bind to the selected Freqtrade runtime BEFORE importing Freqtrade.
+    # If `--repo` points at a Freqtrade clone whose .venv differs from the
+    # current interpreter, transparently re-exec the whole CLI with that
+    # venv's python so the backtest uses the user's real Freqtrade install.
+    if args.command in RUNTIME_COMMANDS and args.repo:
+        from .runtime import reexec_into_runtime
+
+        rc = reexec_into_runtime(Path(args.repo))
+        if rc is not None:
+            # the whole CLI was re-run under the selected repo's venv python;
+            # propagate its exit code and do NOT run the command here.
+            sys.exit(rc)
+
     return args.func(args)
 
 

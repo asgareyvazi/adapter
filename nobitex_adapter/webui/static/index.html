@@ -31,6 +31,17 @@
   <!-- settings -->
   <div class="panel">
     <h2>تنظیمات بک‌تست <span class="muted small">Backtest settings</span></h2>
+
+    <div class="repo-box">
+      <div class="row">
+        <input type="text" id="repoPath" class="grow" dir="ltr"
+               placeholder="C:\Users\You\Desktop\freqtrade  —  Freqtrade repo root (contains .venv + user_data)">
+        <button class="ghost" id="btnApplyRepo">اعمال / Apply repo</button>
+        <span class="chip" id="runtimeChip">runtime: …</span>
+      </div>
+      <div class="muted small" id="runtimeMeta">selecting the repo binds BACKTESTS to its .venv (data + GUI keep running here)</div>
+    </div>
+
     <div class="grid cols-3">
       <label class="field">
         <span class="t">استراتژی / Strategy</span>

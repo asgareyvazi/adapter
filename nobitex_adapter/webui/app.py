@@ -64,14 +64,7 @@ def _preset_range(preset: str) -> tuple[str, str]:
     return now.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d")
 
 
-def create_app(root: Optional[Path] = None) -> FastAPI:
-    app = FastAPI(title="Nobitex Backtest Manager", version=__version__)
-    app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-    )
-
-    root = Path(root) if root is not None else default_repo_root()
-    paths = default_user_data_layout(root)
+def _ensure_layout_dirs(paths: dict) -> None:
     for p in (
         paths["datadir"], paths["strategies_dir"], paths["configs_dir"],
         paths["results_dir"], paths["jobs_dir"], paths["logs_dir"],
@@ -79,8 +72,25 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
     ):
         Path(p).mkdir(parents=True, exist_ok=True)
 
-    jm = JobManager(paths["logs_dir"])
-    markets_cache_file = paths["jobs_dir"].parent / "markets_cache.json"
+
+def create_app(root: Optional[Path] = None) -> FastAPI:
+    app = FastAPI(title="Nobitex Backtest Manager", version=__version__)
+    app.add_middleware(
+        CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    )
+
+    # Mutable binding to the selected Freqtrade repository. The GUI HOST keeps
+    # running in its own Python; BACKTEST JOBS always re-exec into the selected
+    # repo's .venv (see runtime.py + jobs.make_backtest_job), so backtests run
+    # on the user's real Freqtrade install.
+    state: dict[str, Any] = {
+        "root": Path(root) if root is not None else default_repo_root(),
+        "paths": default_user_data_layout(Path(root) if root is not None else default_repo_root()),
+    }
+    _ensure_layout_dirs(state["paths"])
+
+    jm = JobManager(state["paths"]["logs_dir"])
+    markets_cache_file = state["paths"]["jobs_dir"].parent / "markets_cache.json"
     markets_cache: dict[str, Any] = {"markets": [], "fetched_at": None, "source": "cache"}
     if markets_cache_file.is_file():
         try:
@@ -91,11 +101,62 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
             pass
     os.environ["NOBITEX_ADAPTER_MARKETS_CACHE"] = str(markets_cache_file)
 
+    def _paths() -> dict:
+        return state["paths"]
+
+    def set_repo(new_root: Optional[str]) -> dict:
+        """Rebind the GUI to a (different) Freqtrade repository at runtime."""
+        from .. import runtime as rt
+
+        if new_root is None or not str(new_root).strip():
+            state["root"] = default_repo_root()
+        else:
+            candidate = Path(str(new_root).strip()).expanduser()
+            if not candidate.is_dir():
+                raise HTTPException(400, f"Freqtrade repository does not exist: {candidate}")
+            state["root"] = candidate
+        state["paths"] = default_user_data_layout(state["root"])
+        _ensure_layout_dirs(state["paths"])
+        os.environ["NOBITEX_ADAPTER_MARKETS_CACHE"] = str(
+            state["paths"]["jobs_dir"].parent / "markets_cache.json"
+        )
+        try:
+            probe = rt.resolve_runtime(state["root"], require_freqtrade=False)
+            rt_error: Optional[str] = None if probe.ok else probe.error
+        except rt.AdapterRuntimeError as exc:
+            rt_error = str(exc)
+        return {
+            "root": str(state["root"]),
+            "paths": {k: str(v) for k, v in state["paths"].items()},
+            "runtime": _runtime_payload(),
+            "runtime_error": rt_error,
+        }
+
+    def _runtime_payload() -> dict:
+        from .. import runtime as rt
+
+        return rt.diagnose(state["root"] if state["root"] != default_repo_root() else None)
+
     # ------------------------------------------------------------- helpers
     def _strategies() -> list[dict]:
-        out = []
-        for f in sorted(paths["strategies_dir"].glob("*.py")):
+        from ..backtest import bundled_strategies_dir
+
+        out: list[dict] = []
+        seen: set[str] = set()
+        strategies_dir = Path(_paths()["strategies_dir"])
+        # recursive: covers nested strategy-repo layouts (NostalgiaForInfinity/)
+        files = sorted(strategies_dir.rglob("*.py")) if strategies_dir.is_dir() else []
+        for f in files:
             if f.name.startswith("_"):
+                continue
+            try:
+                rel = f.relative_to(strategies_dir)
+            except ValueError:
+                continue
+            if any(
+                part in ("__pycache__", ".git") or part.startswith(".")
+                for part in rel.parts
+            ):
                 continue
             try:
                 src = f.read_text(encoding="utf-8", errors="ignore")
@@ -107,22 +168,50 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
             if not names:
                 names = re.findall(r"^class (\w+)", src, re.M)
             for name in names:
-                if name.startswith("_") or name in ("IStrategy", "Strategy"):
+                if name.startswith("_") or name in ("IStrategy", "Strategy") or name in seen:
                     continue
+                seen.add(name)
                 det = detect_strategy_timeframes(f)
                 out.append({
                     "name": name,
-                    "file": f.name,
+                    "file": str(f.relative_to(strategies_dir)),
+                    "path": str(f),
                     "timeframe": det.get("timeframe"),
                     "info_timeframes": det.get("info_timeframes", []),
+                    "startup_candle_count": det.get("startup_candle_count"),
                 })
+        # bundled fallback strategies (adapter checkout) - clearly marked
+        if not out:
+            bundled = bundled_strategies_dir()
+            for f in sorted(bundled.rglob("*.py")) if bundled.is_dir() else []:
+                if f.name.startswith("_") or "__pycache__" in f.parts:
+                    continue
+                try:
+                    src = f.read_text(encoding="utf-8", errors="ignore")
+                except OSError:
+                    continue
+                for name in re.findall(r"^class (\w+)\(.*IStrategy.*\)", src, re.M):
+                    if name in seen:
+                        continue
+                    seen.add(name)
+                    det = detect_strategy_timeframes(f)
+                    out.append({
+                        "name": name,
+                        "file": f"bundled/{f.name}",
+                        "path": str(f),
+                        "timeframe": det.get("timeframe"),
+                        "info_timeframes": det.get("info_timeframes", []),
+                        "startup_candle_count": det.get("startup_candle_count"),
+                        "bundled": True,
+                    })
         return out
 
     def _markets() -> list[dict]:
         # the discover job writes the cache file; keep the in-memory copy fresh
-        if markets_cache_file.is_file():
+        cache_file = state["paths"]["jobs_dir"].parent / "markets_cache.json"
+        if cache_file.is_file():
             try:
-                loaded = json.loads(markets_cache_file.read_text(encoding="utf-8"))
+                loaded = json.loads(cache_file.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict) and (
                     not markets_cache.get("markets") or
                     (loaded.get("fetched_at") or "") >= (markets_cache.get("fetched_at") or "")
@@ -135,7 +224,7 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
 
     def _data_history() -> list[dict]:
         out = []
-        man = paths["manifests_dir"] / "nobitex"
+        man = _paths()["manifests_dir"] / "nobitex"
         if man.is_dir():
             for f in sorted(man.glob("*.json")):
                 try:
@@ -171,17 +260,46 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
     # --------------------------------------------------------------- routes
     @app.get("/api/status")
     def status():
-        import freqtrade
+        from .. import runtime as rt
 
+        host_freqtrade = None
+        try:
+            import freqtrade
+
+            host_freqtrade = freqtrade.__version__
+        except Exception:  # noqa: BLE001 - host may lack freqtrade (fine)
+            pass
+        selected = rt.diagnose(
+            state["root"] if state["root"] != default_repo_root() else None
+        )["selected"]
         return {
             "app": "nobitex-adapter",
             "version": __version__,
-            "freqtrade": freqtrade.__version__,
+            "freqtrade": host_freqtrade,
             "mode": "BACKTEST / MARKET DATA MODE - NO REAL ORDERS",
             "exchange": "nobitex",
             "futures": False,
+            "repo": str(state["root"]),
+            "backtest_runtime": selected,
             "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
+
+    @app.get("/api/runtime")
+    def runtime_info():
+        """Full runtime diagnostic: host process + selected Freqtrade repo/venv."""
+        from .. import runtime as rt
+
+        return rt.diagnose(state["root"] if state["root"] != default_repo_root() else None)
+
+    @app.post("/api/repo")
+    def set_repo_endpoint(body: dict):
+        """Rebind the GUI to a different Freqtrade repository at runtime."""
+        try:
+            return set_repo(body.get("repo"))
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, str(exc))
 
     @app.get("/api/strategies")
     def strategies():
@@ -221,11 +339,11 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
         if kind == "discover":
             job = jm.submit("discover", make_discover_job, params)
         elif kind == "download":
-            job = jm.submit("download", lambda j: make_download_job(paths, j), params)
+            job = jm.submit("download", lambda j: make_download_job(_paths(), j), params)
         elif kind == "validate":
-            job = jm.submit("validate", lambda j: make_validate_job(paths, j), params)
+            job = jm.submit("validate", lambda j: make_validate_job(_paths(), j), params)
         elif kind == "backtest":
-            job = jm.submit("backtest", lambda j: make_backtest_job(paths, j), params)
+            job = jm.submit("backtest", lambda j: make_backtest_job(_paths(), j), params)
         else:
             raise HTTPException(400, f"unknown job kind {kind!r}")
         return {"job_id": job.id}
@@ -267,7 +385,7 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
     def results_list():
         from ..backtest import list_backtest_zips
 
-        zips = list_backtest_zips(paths["user_data_dir"] / "backtest_results")
+        zips = list_backtest_zips(_paths()["user_data_dir"] / "backtest_results")
         normalized = []
         for z in zips:
             normalized.append({
@@ -283,15 +401,15 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
         from ..backtest import latest_results_zip
         from ..results import load_latest_dashboard
 
-        exportdir = paths["user_data_dir"] / "backtest_results"
-        dash = load_latest_dashboard(exportdir, paths["results_dir"], datadir=paths["datadir"])
+        exportdir = _paths()["user_data_dir"] / "backtest_results"
+        dash = load_latest_dashboard(exportdir, _paths()["results_dir"], datadir=_paths()["datadir"])
         if dash is None:
             raise HTTPException(404, "no backtest results yet")
         return dash
 
     @app.get("/api/results/{name}")
     def results_one(name: str):
-        p = paths["results_dir"] / name
+        p = _paths()["results_dir"] / name
         if not p.is_file() or not p.name.endswith(".dashboard.json"):
             raise HTTPException(404, "no such result")
         return json.loads(p.read_text(encoding="utf-8"))

@@ -39,12 +39,13 @@ def test_detect_strategy_timeframes_on_real_x8(tmp_path):
     (tmp_path / "S.py").write_text(
         'class S:\n    timeframe = "5m"\n'
         '    info_timeframes = ["15m", "1h", "4h", "1d"]\n'
-        '    btc_info_timeframes = ["4h"]\n',
+        '    btc_info_timeframes = ["4h"]\n'
+        '    startup_candle_count = 800\n',
         encoding="utf-8",
     )
     det = detect_strategy_timeframes(tmp_path / "S.py")
     assert det == {"timeframe": "5m", "info_timeframes": ["15m", "1h", "4h", "1d"],
-                   "btc_info_timeframes": ["4h"]}
+                   "btc_info_timeframes": ["4h"], "startup_candle_count": 800}
 
 
 def test_detect_strategy_timeframes_missing_attrs(tmp_path):

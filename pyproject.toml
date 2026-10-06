@@ -9,10 +9,17 @@ description = "Nobitex public market-data adapter + backtest manager for Freqtra
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "GPL-3.0" }
+# NOTE on dependencies:
+#  * `freqtrade` is declared so a FRESH environment can run the adapter, but
+#    the BACKTEST runtime is taken from the selected Freqtrade repo's .venv
+#    (see nobitex_adapter/runtime.py). Installing the adapter INTO that venv
+#    is optional (it works via PYTHONPATH too).
+#  * `python-rapidjson` is Freqtrade's JSON dep (the bare `rapidjson` name on
+#    PyPI is the wrong/legacy package).
 dependencies = [
     "freqtrade>=2024.10",
     "TA-Lib>=0.5",
-    "rapidjson",
+    "python-rapidjson",
     "pyarrow>=14",
     "fastapi>=0.110",
     "uvicorn>=0.29",

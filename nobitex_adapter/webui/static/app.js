@@ -49,7 +49,48 @@ async function init() {
   loadPresets();
   loadHist();
   loadResultsList();
+  loadRuntime();
   bind();
+}
+
+// ------------------------------------------------------------------ runtime
+async function loadRuntime() {
+  try {
+    const r = await api("/api/runtime");
+    const sel = r.selected || {};
+    $("#repoPath").value = sel.repo && sel.repo !== "None" ? sel.repo : "";
+    const chip = $("#runtimeChip");
+    const meta = $("#runtimeMeta");
+    if (sel.ok) {
+      chip.textContent = `backtest runtime: Freqtrade ${sel.freqtrade} · ${sel.python_version || ""}`;
+      chip.className = "chip ok";
+      meta.textContent = `python ${sel.python}  ·  freqtrade ${sel.freqtrade}  ·  ccxt ${sel.ccxt || "?"}  ·  ${sel.freqtrade_module || ""}`;
+    } else if (sel.error) {
+      chip.textContent = "backtest runtime: ⚠ unavailable";
+      chip.className = "chip warn";
+      meta.textContent = sel.error;
+    } else {
+      chip.textContent = "backtest runtime: (repo without .venv — using current interpreter)";
+      chip.className = "chip";
+      meta.textContent = "No Freqtrade repository with a .venv is selected; backtests run in the GUI host interpreter.";
+    }
+  } catch (e) {
+    $("#runtimeChip").textContent = "runtime: ?";
+  }
+}
+async function applyRepo() {
+  const repo = $("#repoPath").value.trim() || null;
+  $("#btnApplyRepo").disabled = true;
+  try {
+    const r = await api("/api/repo", { method: "POST", body: JSON.stringify({ repo }) });
+    loadRuntime();
+    loadStrategies();   // strategy list follows the selected repo
+    loadHist();
+  } catch (e) {
+    $("#runtimeMeta").textContent = String(e.message || e);
+  } finally {
+    $("#btnApplyRepo").disabled = false;
+  }
 }
 
 async function loadStrategies() {
@@ -142,6 +183,8 @@ function syncPairSelection() {
 
 // ------------------------------------------------------------------ jobs
 function bind() {
+  $("#btnApplyRepo").onclick = applyRepo;
+  $("#repoPath").addEventListener("keydown", (e) => { if (e.key === "Enter") applyRepo(); });
   $("#btnRefreshStrat").onclick = () => {
     api("/api/strategies/refresh", { method: "POST" }).then((d) => {
       const sel = $("#strategy"); const v = sel.value;

@@ -48,7 +48,8 @@ def detect_strategy_timeframes(strategy_file: Path) -> dict:
     ``btc_info_timeframes``. No strategy code is executed; if the attributes
     are absent, empty results are returned (caller falls back to base TF).
     """
-    out = {"timeframe": None, "info_timeframes": [], "btc_info_timeframes": []}
+    out = {"timeframe": None, "info_timeframes": [], "btc_info_timeframes": [],
+           "startup_candle_count": None}
     try:
         src = strategy_file.read_text(encoding="utf-8")
     except OSError:
@@ -62,6 +63,9 @@ def detect_strategy_timeframes(strategy_file: Path) -> dict:
     m = re.search(r"^\s*btc_info_timeframes\s*=\s*\[([^\]]*)\]", src, re.M)
     if m:
         out["btc_info_timeframes"] = re.findall(r"[\"']([^\"']+)[\"']", m.group(1))
+    m = re.search(r"^\s*startup_candle_count\s*=\s*(\d+)", src, re.M)
+    if m:
+        out["startup_candle_count"] = int(m.group(1))
     return out
 
 

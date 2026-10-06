@@ -394,7 +394,10 @@ class Downloader:
             task.status = "EMPTY"
             task.rows = 0
             self._emit(event="task_empty", pair=pair, timeframe=tf,
-                       reason="exchange returned no candles for the requested range")
+                       reason="exchange returned no candles for the requested "
+                              "range — pair may not exist on Nobitex or the "
+                              "range predates its data (minute candles start "
+                              "~2022-03-20); run 'Check Markets' to confirm")
             self._save_report(req, pair, tf, None, task)
             return task
 
@@ -450,6 +453,7 @@ class Downloader:
     ) -> ValidationReport:
         # validate the requested backtest window (start..end) on the stored data
         ts_win = _date_to_int_seconds(df["date"])
+        interval = parse_timeframe(tf).seconds
         window = df[
             (ts_win >= _dt_to_ts(req.start)) & (ts_win < end_ts)
         ]
@@ -466,6 +470,16 @@ class Downloader:
             end_is_open=req.end_is_open,
             repair=False,
         )
+        # incomplete final candle: kept a candle that was still open at `end`
+        if req.end_is_open and not req.drop_incomplete_last and len(window):
+            last_ts = int(_date_to_int_seconds(window["date"]).iloc[-1])
+            if last_ts + interval > end_ts:
+                rep.incomplete_last_candle = True
+                rep.problems.append(
+                    "final candle is incomplete (still open at the requested "
+                    "end; re-download with default drop_incomplete or extend "
+                    "the end date)"
+                )
         return rep
 
     def _save_report(self, req, pair, tf, rep, task) -> None:

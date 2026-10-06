@@ -103,6 +103,18 @@ button.primary-big { font-size: 15px; padding: 10px 18px; font-weight: 600; }
   margin: 2px;
 }
 .chip button { border: none; background: transparent; color: var(--muted); padding: 0 4px; font-size: 12px; }
+.chip.ok { border-color: rgba(46, 204, 113, .5); color: #7bedae; }
+.chip.warn { border-color: rgba(241, 196, 15, .55); color: #f7dc6f; }
+
+.repo-box {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  background: rgba(255, 255, 255, .02);
+}
+.repo-box .row { margin-bottom: 6px; }
+.repo-box input[type="text"] { font-family: ui-monospace, monospace; font-size: 13px; }
 
 .pairlist {
   max-height: 220px;
