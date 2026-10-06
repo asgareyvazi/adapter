@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nobitex-adapter"
+version = "0.1.0"
+description = "Nobitex public market-data adapter + backtest manager for Freqtrade (NFI X8)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "GPL-3.0" }
+dependencies = [
+    "freqtrade>=2024.10",
+    "TA-Lib>=0.5",
+    "rapidjson",
+    "pyarrow>=14",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "requests>=2.31",
+    "pandas>=2.0",
+    "numpy",
+]
+
+[project.scripts]
+nobitex-markets = "nobitex_adapter.cli:cmd_markets"
+nobitex-download = "nobitex_adapter.cli:cmd_download"
+nobitex-validate = "nobitex_adapter.cli:cmd_validate"
+nobitex-backtest = "nobitex_adapter.cli:cmd_backtest"
+nobitex-ui = "nobitex_adapter.cli:cmd_ui"
+nobitex-mock = "nobitex_adapter.cli:cmd_mock"
+
+[tool.setuptools.packages.find]
+include = ["nobitex_adapter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# hermetic by default: the `live` tests (real Nobitex API, external network)
+# are opt-in via `pytest -m live`
+addopts = "-m 'not live'"
+markers = [
+    "integration: tests that run real HTTP against the in-repo mock Nobitex API (no external network)",
+    "e2e: full-pipeline tests incl. real Freqtrade backtests (slow)",
+    "live: tests that hit the real Nobitex public API (network required, run with -m live)",
+]

@@ -1,0 +1,17 @@
+Strategy file provenance (DO NOT MODIFY - mission rule: X8 stays unchanged)
+============================================================================
+File:      NostalgiaForInfinityX8.py
+Repo:      https://github.com/iterativv/NostalgiaForInfinity
+Commit:    7663b39a156ff5d7d831d62c67cc2c3cd10ed905
+Fetched:   2026-10-06 (UTC)
+SHA-256:   f202e860ee5937a9a426ad01501d6afeedc6e4a24525cb490815994d85d21cd0
+
+Requirements (from the strategy header / README):
+  - Freqtrade (tested here with 2026.9)
+  - timeframe must be 5m
+  - informative timeframes: 15m, 1h, 4h, 1d (per pair) + BTC/USDT 4h
+  - startup_candle_count = 800 (5m)
+  - no config overrides of use_exit_signal / exit_profit_only /
+    ignore_roi_if_entry_signal
+Verification:
+  sha256sum NostalgiaForInfinityX8.py  -> must match SHA-256 above

@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>مدیریت بک‌تست نوبیتکس — Nobitex Backtest Manager</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+
+  <div class="row">
+    <div class="grow">
+      <h1>مدیریت بک‌تست نوبیتکس</h1>
+      <div class="muted small">Nobitex Backtest Manager — NostalgiaForInfinityX8</div>
+    </div>
+    <div class="badge" id="statusBadge">…</div>
+  </div>
+
+  <div class="banner">⚠ BACKTEST / MARKET DATA MODE — NO REAL ORDERS &nbsp;|&nbsp; حالت بک‌تست / داده بازار — هیچ سفارش واقعی ثبت نمی‌شود</div>
+
+  <!-- workflow steps -->
+  <div class="steps" id="steps">
+    <div class="step" data-step="1"><span class="n">۱</span> بررسی بازارها<div class="s">Check Markets</div><div class="st idle">—</div></div>
+    <div class="step" data-step="2"><span class="n">۲</span> دانلود داده<div class="s">Download Data</div><div class="st idle">—</div></div>
+    <div class="step" data-step="3"><span class="n">۳</span> اعتبارسنجی<div class="s">Validate Data</div><div class="st idle">—</div></div>
+    <div class="step" data-step="4"><span class="n">۴</span> اجرای بک‌تست<div class="s">Run Backtest</div><div class="st idle">—</div></div>
+    <div class="step" data-step="5"><span class="n">۵</span> نتایج<div class="s">Results</div><div class="st idle">—</div></div>
+  </div>
+
+  <!-- settings -->
+  <div class="panel">
+    <h2>تنظیمات بک‌تست <span class="muted small">Backtest settings</span></h2>
+    <div class="grid cols-3">
+      <label class="field">
+        <span class="t">استراتژی / Strategy</span>
+        <div class="row">
+          <select id="strategy" class="grow"></select>
+          <button class="ghost small" id="btnRefreshStrat" title="Refresh strategies">↻</button>
+        </div>
+        <div class="muted small" id="strategyMeta"></div>
+      </label>
+      <label class="field">
+        <span class="t">ارائه‌دهنده / Exchange</span>
+        <select id="exchange"></select>
+      </label>
+      <label class="field">
+        <span class="t">حالت معاملاتی / Trading mode</span>
+        <div class="row">
+          <select id="mode" class="grow">
+            <option value="spot" selected>Spot — اسپات</option>
+            <option value="futures" disabled>Futures — فیوچرز (به‌زودی)</option>
+          </select>
+        </div>
+        <div class="muted small">فیوچرز در نسخه بعدی اضافه می‌شود</div>
+      </label>
+    </div>
+
+    <div class="grid cols-3">
+      <label class="field">
+        <span class="t">تایم‌فریم پایه / Base timeframe</span>
+        <select id="timeframe">
+          <option value="5m" selected>5m</option>
+          <option value="15m">15m</option>
+          <option value="1h">1h</option>
+          <option value="4h">4h</option>
+          <option value="1d">1d</option>
+        </select>
+      </label>
+      <div class="field">
+        <span class="t">محدوده تاریخ / Date range <span class="muted">(UTC)</span></span>
+        <div class="row">
+          <input type="date" id="start" class="grow">
+          <input type="date" id="end" class="grow">
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="ghost small" data-preset="1M">۱ ماه</button>
+          <button class="ghost small" data-preset="3M">۳ ماه</button>
+          <button class="ghost small" data-preset="6M">۶ ماه</button>
+          <button class="ghost small" data-preset="1Y">۱ سال</button>
+          <button class="ghost small" data-preset="2Y">۲ سال</button>
+          <button class="ghost small" data-preset="3Y">۳ سال</button>
+          <span class="muted small" id="availRange"></span>
+        </div>
+      </div>
+      <div>
+        <div class="row" style="gap:8px">
+          <label class="field grow" style="margin:0">
+            <span class="t">موجودی اولیه (USDT) / Initial balance</span>
+            <input type="number" id="capital" value="10000" min="1">
+          </label>
+          <label class="field grow" style="margin:0">
+            <span class="t">حداکثر معامله باز / Max open trades</span>
+            <input type="number" id="maxOpen" value="8" min="1" max="100">
+          </label>
+        </div>
+        <div class="row" style="gap:8px;margin-top:10px">
+          <label class="field grow" style="margin:0">
+            <span class="t">ارز استیک / Stake currency</span>
+            <select id="stakeCur"><option>USDT</option><option>USDC</option></select>
+          </label>
+          <label class="field grow" style="margin:0">
+            <span class="t">مبلغ هر معامله / Stake amount</span>
+            <select id="stakeAmount">
+              <option value="unlimited" selected>unlimited — نامحدود</option>
+              <option value="100">100</option>
+              <option value="500">500</option>
+              <option value="1000">1000</option>
+              <option value="2500">2500</option>
+            </select>
+          </label>
+          <label class="field" style="margin:0;width:110px">
+            <span class="t">کارمزد / Fee</span>
+            <input type="number" id="fee" value="0.002" step="0.0005" min="0" title="0.002 = 0.2%">
+          </label>
+        </div>
+        <details class="adv">
+          <summary>تنظیمات پیشرفته / Advanced settings (JSON override)</summary>
+          <textarea id="advJson" placeholder='{"trailing_stop": false, "order_types": {...}}' spellcheck="false"></textarea>
+        </details>
+      </div>
+    </div>
+
+    <hr class="sep">
+
+    <!-- pairs -->
+    <h3>جفت‌ارزها / Pairs</h3>
+    <div class="row">
+      <button id="btnDiscover" class="primary-big">🔍 کشف بازارهای نوبیتکس <span class="muted">Discover Nobitex USDT markets</span></button>
+      <span class="muted small" id="discoverMeta"></span>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <input type="search" id="pairSearch" class="grow" placeholder="جستجو… / search e.g. BTC">
+      <button class="ghost small" id="btnSelAll">انتخاب همه / Select All</button>
+      <button class="ghost small" id="btnSelRec">پیشنهادی / Recommended</button>
+      <button class="ghost small" id="btnSelClear">پاک کردن / Clear</button>
+      <span class="chip">جفت‌ارزهای انتخابی: <b id="pairCount">0</b></span>
+    </div>
+    <div class="pairlist" id="pairList" style="margin-top:8px">
+      <div class="muted">برای بارگذاری لیست، «کشف بازارها» را بزنید / click Discover to load markets</div>
+    </div>
+  </div>
+
+  <!-- actions -->
+  <div class="panel">
+    <h2>اجرا <span class="muted small">Actions</span></h2>
+    <div class="row">
+      <button id="act1" class="primary-big">۱. Check Markets</button>
+      <button id="act2" class="primary-big">۲. Download Data</button>
+      <button id="act3" class="primary-big">۳. Validate Data</button>
+      <button id="act4" class="primary-big">۴. Run Backtest</button>
+      <button id="act5" class="primary-big">۵. Open Results</button>
+      <button id="btnCancel" class="danger" style="margin-right:auto">لغو / Cancel</button>
+    </div>
+    <div id="progressWrap" class="hidden" style="margin-top:12px">
+      <div class="row">
+        <div class="progress-outer grow">
+          <div class="progress-inner" id="progressBar"></div>
+          <div class="progress-label" id="progressLabel">…</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="muted small" id="progressMeta"></span>
+      </div>
+    </div>
+    <div class="logbox hidden" id="logBox"></div>
+  </div>
+
+  <!-- results -->
+  <div class="panel hidden" id="resultsPanel">
+    <div class="row">
+      <h2 style="margin:0">نتایج بک‌تست <span class="muted small">Backtest results</span></h2>
+      <span class="muted small ltr" id="resultsMeta"></span>
+      <select id="resultsSel" style="width:auto;min-width:280px"></select>
+      <button class="ghost small" id="btnResultsRefresh">↻</button>
+    </div>
+    <div class="grid cols-3" id="cards" style="margin-top:12px"></div>
+
+    <h3>منحنی سرمایه / Equity curve</h3>
+    <div class="chart" id="equityChart"><div class="tooltip"></div></div>
+
+    <h3>کاهش سرمایه / Drawdown</h3>
+    <div class="chart" id="ddChart"><div class="tooltip"></div></div>
+
+    <div class="grid cols-2" style="margin-top:10px">
+      <div>
+        <h3>عملکرد جفت‌ارزها / Pair performance</h3>
+        <div style="max-height:320px;overflow:auto"><table class="tbl" id="pairTbl"></table></div>
+      </div>
+      <div>
+        <h3>دلیل خروج / Exit reasons</h3>
+        <div style="max-height:320px;overflow:auto"><table class="tbl" id="exitTbl"></table></div>
+      </div>
+    </div>
+
+    <div class="grid cols-2" style="margin-top:10px">
+      <div>
+        <h3>عملکرد ماهانه / Monthly performance</h3>
+        <div style="max-height:320px;overflow:auto"><table class="tbl" id="monthTbl"></table></div>
+      </div>
+      <div>
+        <h3>مقایسه با Buy &amp; Hold</h3>
+        <div id="bhCards"></div>
+        <div class="muted small" style="margin-top:8px">
+          بازده استراتژی در برابر بازده بازار (خرید و نگهداری). داده Buy&amp;Hold از فایل‌های دانلودشده محاسبه می‌شود.
+        </div>
+      </div>
+    </div>
+
+    <h3>معاملات (نمونه) / Trades</h3>
+    <div style="max-height:300px;overflow:auto"><table class="tbl" id="tradeTbl"></table></div>
+  </div>
+
+  <div class="panel">
+    <h2>سوابق دانلود داده / Download history</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button class="ghost small" id="btnHistRefresh">↻</button>
+      <span class="muted small">داده‌های موجود می‌توانند بدون دانلود مجدد استفاده شوند / existing data can be reused without re-download</span>
+    </div>
+    <div style="max-height:260px;overflow:auto"><table class="tbl" id="histTbl"></table></div>
+  </div>
+
+  <div class="footer">
+    Nobitex Backtest Manager v0.1 — داده‌ها: API عمومی نوبیتکس / Freqtrade — هیچ سفارش واقعی ثبت نمی‌شود
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

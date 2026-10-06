@@ -1,0 +1,183 @@
+"""Shared fixtures and fakes for the Nobitex adapter test suite.
+
+Unit tests never touch the network: HTTP is faked with scripted responses.
+Integration/e2e tests (marked) spin up the in-repo mock Nobitex server on a
+local port and/or run real Freqtrade backtests on a small controlled range.
+"""
+from __future__ import annotations
+
+import socket
+import threading
+import time
+from datetime import datetime, timezone
+from typing import Any, Callable, Optional
+from unittest import mock
+
+import pandas as pd
+import pytest
+
+from nobitex_adapter.nobitex_client import NobitexClient
+
+
+# --------------------------------------------------------------------- fakes
+class FakeResponse:
+    def __init__(self, status_code: int = 200, json_data: Any = None, text: str = ""):
+        self.status_code = status_code
+        self._json = json_data
+        self.text = text or (str(json_data) if json_data is not None else "")
+
+    def json(self) -> Any:
+        if self._json is None:
+            raise ValueError("no json")
+        return self._json
+
+
+class FakeSession:
+    """Scripted `requests.Session` stand-in.
+
+    `script` is a list of either:
+      * FakeResponse -> returned as-is
+      * Exception instance -> raised on .get()
+    Requests beyond the script length raise AssertionError (unexpected call).
+    """
+
+    def __init__(self, script: list):
+        self.script = list(script)
+        self.calls: list[dict] = []
+
+    def get(self, url: str, params: Optional[dict] = None, timeout: float = 0, **kw) -> FakeResponse:
+        self.calls.append({"url": url, "params": params})
+        if not self.script:
+            raise AssertionError(f"unexpected request to {url} params={params}")
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def close(self) -> None:
+        pass
+
+
+def make_client(
+    script: list,
+    *,
+    sleeps: Optional[list] = None,
+    base_url: str = "http://test.nobitex.local",
+) -> NobitexClient:
+    """Build a NobitexClient against a FakeSession with no real waiting."""
+    if sleeps is None:
+        sleeps = []
+    client = NobitexClient(
+        base_url=base_url,
+        session=FakeSession(script),  # type: ignore[arg-type]
+        sleep=sleeps.append,
+    )
+    # neutralize rate limiting so tests run instantly
+    client._limiter = mock.MagicMock()  # type: ignore[assignment]
+    return client
+
+
+def candles_payload(n: int, start_ts: int, interval: int = 300, price: float = 100.0) -> dict:
+    """Build a documented columnar /market/udf/history 'ok' payload."""
+    t = [start_ts + i * interval for i in range(n)]
+    return {
+        "s": "ok",
+        "t": t,
+        "o": [price] * n,
+        "h": [price * 1.01] * n,
+        "l": [price * 0.99] * n,
+        "c": [price * 1.005] * n,
+        "v": [10.0] * n,
+    }
+
+
+def make_df(
+    start_ts: int,
+    n: int,
+    interval: int = 300,
+    *,
+    base: float = 100.0,
+) -> pd.DataFrame:
+    """Freqtrade-format dataframe (unix-second `date` column)."""
+    dates = [start_ts + i * interval for i in range(n)]
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "open": [base] * n,
+            "high": [base * 1.01] * n,
+            "low": [base * 0.99] * n,
+            "close": [base * 1.005] * n,
+            "volume": [5.0] * n,
+        }
+    )
+
+
+# ------------------------------------------------------------------ fixtures
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture(scope="module")
+def mock_server_url():
+    """Run the in-repo mock Nobitex API on a local port (real HTTP)."""
+    import uvicorn
+
+    from nobitex_adapter.mockserver import app as mock_app
+
+    port = free_port()
+    config = uvicorn.Config(mock_app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        raise RuntimeError("mock server did not start")
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    thread.join(timeout=5)
+
+
+SMALL_STRATEGY = '''
+from freqtrade.strategy import IStrategy
+
+
+class TinyStrategy(IStrategy):
+    """Minimal strategy for unit-level backtest plumbing tests."""
+
+    timeframe = "5m"
+    can_short = False
+    minimal_roi = {"0": 0.01}
+    stoploss = -0.05
+    startup_candle_count = 10
+
+    def populate_indicators(self, dataframe, metadata):
+        dataframe["sma"] = dataframe["close"].rolling(5).mean()
+        return dataframe
+
+    def populate_entry_trend(self, dataframe, metadata):
+        dataframe.loc[
+            (dataframe["sma"] > 0) & (dataframe["volume"] > 0), "enter_long"] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe, metadata):
+        dataframe.loc[dataframe["sma"].shift(1) > dataframe["sma"], "exit_long"] = 1
+        return dataframe
+'''
+
+
+@pytest.fixture
+def tmp_repo(tmp_path):
+    """A throw-away repo layout: root with user_data/ + a small strategy."""
+    strategies = tmp_path / "user_data" / "strategies"
+    strategies.mkdir(parents=True)
+    (strategies / "TinyStrategy.py").write_text(SMALL_STRATEGY, encoding="utf-8")
+    (tmp_path / "user_data" / "data").mkdir(parents=True)
+    return tmp_path

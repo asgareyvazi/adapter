@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+ftenv/
+
+# Freqtrade user_data: downloaded data, generated configs, run outputs (NEVER commit data/secrets)
+user_data/data/
+user_data/backtest_results/
+user_data/nobitex_gui/configs/
+user_data/nobitex_gui/results/
+user_data/nobitex_gui/jobs/
+user_data/nobitex_gui/logs/
+user_data/nobitex_gui/manifests/
+user_data/nobitex_gui/reports/
+user_data/nobitex_gui/markets_cache.json
+user_data/logs/
+user_data/hyperopt_results/
+user_data/freqtrade.db*
+user_data/*.json
+# keep only the strategy files + source notes under user_data/strategies in git
+!user_data/strategies/*.py
+!user_data/strategies/*.txt
+user_data/config*
+
+# Local secrets — never commit
+.env
+*.secret.json
+config*.secret.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
