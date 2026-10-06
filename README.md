@@ -38,7 +38,7 @@ duplicated.
 | `nobitex_adapter/` | The adapter package (client, downloader, validator, ccxt exchange class, config generator, backtest runner, results parser, job manager, mock API server, **runtime binding**) |
 | `nobitex_adapter/runtime.py` | Stdlib-only runtime layer: venv discovery, probe, re-exec, `doctor` diagnostic |
 | `nobitex_adapter/webui/` | FastAPI app + dependency-free static UI (dark, RTL/farsi + English) |
-| `tests/` | 184 tests: unit, integration (against the in-repo mock API), e2e (real Freqtrade + X8) |
+| `tests/` | 232 tests: unit, integration (against the in-repo mock API), e2e (real Freqtrade + X8) |
 | `user_data/strategies/NostalgiaForInfinityX8.py` | The real X8 strategy, **unmodified** (provenance in `STRATEGY_SOURCE.txt`) |
 | `user_data/nobitex_gui/` | Generated run configs, job state, logs, saved dashboards (git-ignored) |
 | `user_data/data/nobitex/` | Downloaded feather data (git-ignored) |
@@ -268,7 +268,15 @@ python -m nobitex_adapter --repo /path/to/freqtrade backtest \
 # what runtime would this command use? (host + selected, versions + paths)
 python -m nobitex_adapter --repo /path/to/freqtrade doctor
 
-# Windows PowerShell equivalents — same commands, backslash→newline via ``
+# raw public OHLCV diagnostic: print the EXACT request URL + raw JSON for a
+# pair/timeframe/range, then auto-probe (requested range, narrow window,
+# recent range, countback) and diagnose WHY a range can come back empty.
+# Public endpoint only — no keys, no private data.
+python -m nobitex_adapter ohlcv-probe \
+    --pair BTC/USDT --timeframe 5m --start 2024-06-01 --end 2024-06-06
+
+# Windows PowerShell equivalents — same commands, backslash→newline via ``.
+# NOTE: QUOTE the --timeframes list in PowerShell (see below).
 python -m nobitex_adapter --repo C:\Users\A-Eyvazi\Desktop\New\ folder\freqtrade backtest `
     --strategy NostalgiaForInfinityX8 `
     --pairs BTC/USDT,ETH/USDT,SOL/USDT `
@@ -276,10 +284,32 @@ python -m nobitex_adapter --repo C:\Users\A-Eyvazi\Desktop\New\ folder\freqtrade
 ```
 
 Useful flags: `--repo` (bind backtest to a Freqtrade clone's `.venv`; global
-option, before the subcommand), `doctor` (runtime diagnostic); `download
---force` (ignore resume manifest), `--startup 5m:850,1d:260` (per-tf lead-in
-overrides), `--keep-incomplete`; `backtest --out results.json`
-(machine-readable result descriptor incl. `runtime`), `--skip-precheck`.
+option, before the subcommand), `doctor` (runtime diagnostic), `ohlcv-probe`
+(raw public OHLCV request/response diagnostic); `download --force` (ignore
+resume manifest), `--startup 5m:850,1d:260` (per-tf lead-in overrides),
+`--keep-incomplete`; `backtest --out results.json` (machine-readable result
+descriptor incl. `runtime`), `--skip-precheck`.
+
+### `--timeframes` is normalized at one boundary (shell-safe)
+
+`--timeframes` (download/validate) and the GUI timeframes both go through a
+single canonical normalizer (`timeframes.normalize_timeframes`) that:
+
+* accepts `"5m"`, `"5m,15m,1h"`, `"5m 15m 1h"`, `["5m","15m"]`, tuples, sets,
+  and nested forms — all to a canonical deduplicated list;
+* **never** iterates a string character-by-character, so `1d` can only ever
+  be `["1d"]` (it can *never* become `["1","d"]`);
+* trims whitespace, splits on comma/semicolon/space;
+* rejects invalid or Nobitex-unsupported timeframes with a clear error that
+  shows the raw received value (no traceback).
+
+> **PowerShell note (real incident):** in PowerShell an unquoted comma list
+> like `--timeframes 5m,15m,1h,4h,1d` can be mangled by the shell's
+> comma-array handling before it reaches Python. Always **quote** the list:
+> `--timeframes "5m,15m,1h,4h,1d"`. The normalizer also accepts the
+> space-joined form a shell may produce, and if a broken token still reaches
+> it, you get an actionable `invalid timeframe '…' in --timeframes=[…]`
+> error instead of a mid-download crash.
 
 ---
 
@@ -331,6 +361,43 @@ exponential backoff on network errors/5xx, **honors `429 {backOff}`**
 (documented rate-limit response), 500-candle page pagination, malformed
 candle rejection with full request context, cancellation at chunk boundaries.
 
+**Zero data is a hard failure, never a silent success.** If a
+pair/timeframe ends with zero candles over the requested range, the task is
+`ERROR` (exit code 1) and the output carries the exact empty responses seen
+(`no_data symbol=… res=… from=… to=… page=…`) plus the `ohlcv-probe` command
+to inspect the raw API answers. A download can no longer report "success"
+while a timeframe quietly has no data.
+
+**Adaptive window narrowing.** Each chunk is fetched in ≤500-candle windows.
+If a *wide* window comes back empty, the downloader retries it narrower
+(500 → 250 → … → 10 candles) before declaring it empty. This makes the
+downloader immune to an undocumented per-request **range-width limit** (an
+API that answers `no_data` for wide ranges but serves narrow ones) while
+adding **zero** extra requests when data is present. A genuinely empty
+region is not crawled candle-by-candle (the cursor jumps to the full window
+end once a 10-candle probe is empty).
+
+### Nobitex resolution mapping & minute-data depth
+
+Freqtrade timeframes map to Nobitex `/market/udf/history` `resolution` values
+exactly as documented: `1m→1`, `5m→5`, `15m→15`, `30m→30`, `1h→60`, `3h→180`,
+`4h→240`, `6h→360`, `12h→720`, `1d→D`, `2d→2D`, `3d→3D`. `from`/`to` are unix
+seconds; an invalid resolution answers `{"s":"error","errmsg":"Invalid
+resolution!"}` (the client surfaces that as an error, not as zero data).
+
+> **Documented minute-data depth:** Nobitex states minute-level candles are
+> available from the start of 1401 (≈ **2022-03-20**); hourly/daily go back
+> further. In practice the *effective* depth of a **5m/15m series for a
+> specific pair can be shorter than the documented floor** (a pair's minute
+> history may only start when that pair's minute data was first recorded).
+> If a 5m/15m range returns zero while 1h/4h/1d of the same range have
+> data, that is the likely cause — run `ohlcv-probe --timeframe 5m` to see
+> the raw responses (it probes the requested era, a narrow same-era window,
+> the most-recent candles, and `countback`, then prints a diagnosis:
+> history-depth gap vs range limit vs symbol). Choose a later `--start` or a
+> coarser timeframe in that case. This is an API data-availability limit,
+> handled explicitly (hard fail + diagnosis), not papered over with zeros.
+
 ---
 
 ## 7. Tests
@@ -356,6 +423,19 @@ validation, config generation (no `api_server`, entry/exit pricing,
 lifecycle (discover → download → validate → backtest-subprocess → results,
 incl. cancel), and a **full-pipeline e2e** running the unmodified X8
 strategy on a small controlled range end to end.
+
+**Timeframe-normalization + zero-data tests**
+(`test_timeframe_normalization.py`, `test_cli_timeframes.py`,
+`test_downloader.py`, `test_freqtrade_compat.py`): the canonical boundary
+(`"5m"` / `"5m,15m,1h"` / `"5m 15m 1h"` / lists / tuples / sets; `1d` can
+never become `["1","d"]`; invalid tokens rejected with the raw value shown),
+the real incident command end to end (all five X8 timeframes download;
+PowerShell space-join accepted; char-split input → clean exit 2, no
+traceback), zero-data = hard `ERROR` with the exact empty requests + probe
+hint, adaptive window narrowing against a wide-range-refusing API, bounded
+request count on truly-empty regions, and a **Freqtrade-compatibility
+proof** (downloaded feather loaded through Freqtrade's own data handler:
+tz-aware UTC, canonical columns, strictly monotonic, no duplicates).
 
 **Runtime-binding tests** (`test_runtime.py`, `test_strategy_discovery.py`,
 `test_e2e_runtime.py`): venv discovery (POSIX + Windows layouts), runtime

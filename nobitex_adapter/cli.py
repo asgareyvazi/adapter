@@ -101,12 +101,17 @@ def cmd_markets(args) -> int:
 def cmd_download(args) -> int:
     from .downloader import DownloadRequest, Downloader
     from .nobitex_client import NobitexClient
+    from .timeframes import TimeframeError, normalize_timeframes
 
     _setup_logging(args.verbose)
     root = Path(args.repo) if args.repo else default_repo_root()
     paths = default_user_data_layout(root)
     pairs = _parse_pairs(args.pairs)
-    tfs = [t.strip() for t in args.timeframes.split(",") if t.strip()]
+    try:
+        tfs = normalize_timeframes(args.timeframes, param_name="--timeframes")
+    except TimeframeError as exc:
+        print(f"error: {exc}")
+        return 2
 
     client = NobitexClient()
 
@@ -129,7 +134,9 @@ def cmd_download(args) -> int:
             )
         elif e == "task_empty":
             print()
-            print(f"[empty] {ev.get('pair')} {ev.get('timeframe')}: {ev.get('reason')}")
+            print(f"[zero-data FAIL] {ev.get('pair')} {ev.get('timeframe')}")
+            for line in str(ev.get("reason", "")).splitlines():
+                print(f"  {line}")
 
     dl = Downloader(client, paths["datadir"], paths["manifests_dir"], paths["reports_dir"], progress)
     try:
@@ -155,15 +162,142 @@ def cmd_download(args) -> int:
     return 0 if summary.ok else 1
 
 
+# ------------------------------------------------------------------ probe
+def cmd_ohlcv_probe(args) -> int:
+    """Raw public-OHLCV diagnostic: inspect the exact request/response for a
+    pair/timeframe/range, then auto-run a battery of probes that pin down
+    WHY a range comes back empty (history depth vs range limit vs symbol).
+
+    PUBLIC endpoint only — no auth, no private data.
+    """
+    from .nobitex_client import NobitexClient, NobitexNoData, NobitexError
+    from .timeframes import (
+        TimeframeError,
+        normalize_timeframes,
+        parse_timeframe,
+        to_nobitex_resolution,
+    )
+
+    _setup_logging(args.verbose)
+    try:
+        tfs = normalize_timeframes([args.timeframe], param_name="--timeframe")
+    except TimeframeError as exc:
+        print(f"error: {exc}")
+        return 2
+    tf = tfs[0]
+    interval = parse_timeframe(tf).seconds
+    resolution = to_nobitex_resolution(tf)
+    sym = args.pair.replace("/", "")
+
+    client = NobitexClient()
+    end_ts = int(_parse_dt(args.end, default_now=True).timestamp())
+    start_ts: Optional[int] = (
+        int(_parse_dt(args.start).timestamp()) if args.start else None
+    )
+
+    def _show(label: str, params: dict) -> Optional[int]:
+        """Run one probe. Returns candle count, -1 for no_data, None for
+        transport/API error."""
+        url = f"{client.base_url}/market/udf/history?" + "&".join(
+            f"{k}={v}" for k, v in params.items()
+        )
+        print(f"\n=== {label} ===")
+        print(f"GET {url}")
+        try:
+            payload = client._get("/market/udf/history", params)
+        except NobitexNoData as e:
+            print(f"RESPONSE: no_data  ({e.context()})")
+            return -1
+        except NobitexError as e:
+            print(f"RESPONSE: ERROR {e.context()}")
+            return None
+        raw = json.dumps(payload)
+        print(f"RESPONSE: {raw[: args.raw_chars]}")
+        t = payload.get("t") or []
+        if t:
+            from .downloader import data_ts_iso
+
+            print(f"-> {len(t)} candles, first={data_ts_iso(int(t[0]))} "
+                  f"last={data_ts_iso(int(t[-1]))}")
+            return len(t)
+        print(f"-> {payload.get('s')} (no candle arrays)")
+        return 0
+
+    # P1: the requested range, first page
+    p1: Optional[int] = None
+    if start_ts is not None:
+        p1 = _show("P1: requested range (page 1)",
+                   {"symbol": sym, "resolution": resolution,
+                    "from": start_ts, "to": end_ts, "page": 1})
+    # P2: narrow 10-candle window ending at `end` (same era)
+    p2 = _show("P2: narrow 10-candle window ending at end (same era)",
+               {"symbol": sym, "resolution": resolution,
+                "from": end_ts - 10 * interval, "to": end_ts, "page": 1})
+    # P3: most recent 10 candles (does this timeframe exist AT ALL recently?)
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    p3 = _show("P3: most recent 10 candles (last ~2h of data)",
+               {"symbol": sym, "resolution": resolution,
+                "from": now_ts - 10 * interval, "to": now_ts, "page": 1})
+    # P4: documented countback mode (candles before `to`, priority over from)
+    p4 = _show("P4: countback=10 ending at end (documented countback mode)",
+               {"symbol": sym, "resolution": resolution,
+                "to": end_ts, "countback": 10})
+    client.close()
+
+    print("\n=== diagnosis ===")
+    if p3 is None:
+        print("A probe hit a transport/API error — fix connectivity/API "
+              "first, then re-run this probe.")
+    elif p3 in (0, -1):
+        print("P3 (recent data) is EMPTY too -> the symbol/timeframe itself "
+              "returns no data at all: check the symbol with 'markets' or "
+              "the resolution (an invalid resolution answers s=error, not "
+              "no_data).")
+    elif p1 is not None and p1 > 0:
+        print(f"Requested range DOES return data ({p1} candles on page 1) "
+              f"-> re-run the download; if it still reports zero, inspect "
+              f"the task error lines for the exact empty responses.")
+    else:
+        # recent data exists, but the requested era does not (or the wide
+        # request is empty)
+        if p2 is not None and p2 > 0:
+            print("The NARROW window at the end of the requested era has "
+                  "data while the wide request is empty -> the API limits "
+                  "per-request RANGE WIDTH; the adapter's downloader now "
+                  "retries wide windows narrower (adaptive narrowing), so "
+                  "re-run the download.")
+        else:
+            print("HISTORY-DEPTH GAP: recent data exists but the requested "
+                  "era does NOT. Nobitex has no candles for this "
+                  "pair/timeframe that far back (minute-level 5m/15m "
+                  "history is the usual suspect; documented floor is "
+                  "~2022-03-20). Choose a later --start or a coarser "
+                  "timeframe.")
+            if p4 is not None and p4 > 0:
+                print(f"P4 countback returned {p4} candle(s) ending near "
+                      f"`end` -> data exists close to `end` but not at "
+                      f"`start` (a mid-range depth gap, not a range limit).")
+    print("\n(probe uses the PUBLIC endpoint only; no keys, no private data)")
+    # non-zero only when an executed probe hit a transport/API error (not
+    # no_data, which is a valid, informative answer)
+    executed = [p2, p3, p4] + ([p1] if start_ts is not None else [])
+    return 1 if any(r is None for r in executed) else 0
+
+
 # ---------------------------------------------------------------- validate
 def cmd_validate(args) -> int:
     from .downloader import Downloader
+    from .timeframes import TimeframeError, normalize_timeframes
 
     _setup_logging(args.verbose)
     root = Path(args.repo) if args.repo else default_repo_root()
     paths = default_user_data_layout(root)
     pairs = _parse_pairs(args.pairs)
-    tfs = [t.strip() for t in args.timeframes.split(",") if t.strip()]
+    try:
+        tfs = normalize_timeframes(args.timeframes, param_name="--timeframes")
+    except TimeframeError as exc:
+        print(f"error: {exc}")
+        return 2
     dl = Downloader(None, paths["datadir"], paths["manifests_dir"], paths["reports_dir"])  # type: ignore[arg-type]
     reports = dl.validate_dataset(
         exchange=args.exchange,
@@ -320,6 +454,18 @@ def build_parser() -> argparse.ArgumentParser:
                      help="keep the still-open last candle")
     pdl.add_argument("--startup", default=None, help="tf:candles overrides, e.g. 5m:850,1d:260")
     pdl.set_defaults(func=cmd_download)
+
+    pp = sub.add_parser(
+        "ohlcv-probe",
+        help="raw public OHLCV diagnostic: show exact request/response for a pair/timeframe/range",
+    )
+    pp.add_argument("--pair", required=True, help="e.g. BTC/USDT")
+    pp.add_argument("--timeframe", required=True, help="single timeframe, e.g. 5m")
+    pp.add_argument("--start", default=None, help="YYYY-MM-DD (enables the requested-range probe)")
+    pp.add_argument("--end", default="now")
+    pp.add_argument("--raw-chars", type=int, default=1200,
+                    help="how much of each raw JSON response to print")
+    pp.set_defaults(func=cmd_ohlcv_probe)
 
     pv = sub.add_parser("validate", help="validate stored data")
     pv.add_argument("--pairs", required=True)

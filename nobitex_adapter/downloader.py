@@ -77,8 +77,10 @@ class DownloadRequest:
     def validate(self) -> None:
         if not self.pairs:
             raise ValueError("no pairs given")
-        if not self.timeframes:
-            raise ValueError("no timeframes given")
+        # canonical boundary: normalize timeframes even for programmatic use
+        from .timeframes import normalize_timeframes
+
+        self.timeframes = normalize_timeframes(self.timeframes, param_name="timeframes")
         s, e = _dt_to_ts(self.start), _dt_to_ts(self.end)
         if e <= s:
             raise ValueError("end must be after start")
@@ -88,7 +90,7 @@ class DownloadRequest:
 class TaskResult:
     pair: str
     timeframe: str
-    status: str = "PENDING"  # PENDING/DOWNLOADING/DONE/EMPTY/ERROR
+    status: str = "PENDING"  # PENDING/DOWNLOADING/DONE/ERROR
     rows: int = 0
     new_rows: int = 0
     duplicates_removed: int = 0
@@ -112,7 +114,8 @@ class DownloadSummary:
 
     @property
     def ok(self) -> bool:
-        return all(t.status in ("DONE", "EMPTY") for t in self.tasks) and self.all_valid
+        # zero-data tasks are ERROR (never silent success)
+        return all(t.status == "DONE" for t in self.tasks) and self.all_valid
 
     def to_dict(self) -> dict:
         return {
@@ -274,7 +277,7 @@ class Downloader:
                     raise NobitexError("cancelled by user", code="Cancelled")
                 task = self._download_one(req, pair, tf)
                 summary.tasks.append(task)
-                if task.status not in ("DONE", "EMPTY"):
+                if task.status != "DONE":
                     summary.all_valid = False
 
         summary.total_rows = sum(t.rows for t in summary.tasks)
@@ -285,12 +288,48 @@ class Downloader:
     def _stopped(self) -> bool:
         return self.stop_event is not None and self.stop_event.is_set()
 
+    def _fetch_window(
+        self,
+        sym: str,
+        resolution: str,
+        start_ts: int,
+        end_ts: int,
+        empty_reqs: list[str],
+    ) -> list:
+        """Fetch [start_ts, end_ts) via <=500-candle pages.
+
+        Returns candles (possibly empty). Every empty response is recorded
+        in ``empty_reqs`` with its exact request context so a zero-data
+        task can be diagnosed instead of failing silently.
+        """
+        out = []
+        page = 1
+        while True:
+            try:
+                batch = self.client.candles_page(
+                    symbol=sym, resolution=resolution,
+                    start_ts=start_ts, end_ts=end_ts, page=page,
+                )
+            except NobitexNoData:
+                empty_reqs.append(
+                    f"no_data symbol={sym} res={resolution} "
+                    f"from={start_ts} to={end_ts} page={page}"
+                )
+                break
+            out.extend(batch)
+            if len(batch) < CANDLES_PER_PAGE:
+                break
+            page += 1
+        return out
+
     def _download_one(self, req: DownloadRequest, pair: str, tf: str) -> TaskResult:
         t = parse_timeframe(tf)
         interval = t.seconds
         resolution = to_nobitex_resolution(tf)
+        sym = pair.replace("/", "")
         path = data_filename(self.datadir, req.exchange, pair, tf)
         manifest_path = self._manifest_path(req, pair, tf)
+        empty_reqs: list[str] = []
 
         start_ts = _dt_to_ts(req.start)
         end_ts = _dt_to_ts(req.end)
@@ -331,20 +370,36 @@ class Downloader:
             # Fetch the chunk in windows of <= CANDLES_PER_PAGE candles.
             # A short window means the data edge was reached (market opened
             # mid-window or history ends) -> the chunk is complete.
+            #
+            # Adaptive narrowing: if a WIDE window comes back empty, retry
+            # it narrower before declaring it empty. This makes the
+            # downloader immune to undocumented per-request range limits
+            # (an API that refuses wide ranges) while adding ZERO requests
+            # when data is present. An empty narrow window advances the
+            # cursor by the window width (the API asserted no data there).
             chunk_candles = []
             page_start = cs
             seen_ts: set[int] = set(c.ts for c in new_candles)
             while page_start < ce:
-                window_end = min(page_start + CANDLES_PER_PAGE * interval, ce)
-                try:
-                    batch = self.client.candles_range(
-                        symbol=pair.replace("/", ""),
-                        resolution=resolution,
-                        start_ts=page_start,
-                        end_ts=window_end + interval,  # inclusive edge safety
+                full_end = min(page_start + CANDLES_PER_PAGE * interval, ce)
+                window_end = full_end
+                batch: list = []
+                narrowed = False
+                while True:
+                    batch = self._fetch_window(
+                        sym, resolution, page_start, window_end + interval,
+                        empty_reqs,
                     )
-                except NobitexNoData:
-                    batch = []
+                    if any(cs <= c.ts < ce for c in batch) \
+                            or (window_end - page_start) <= 10 * interval:
+                        break
+                    # empty wide window -> halve it and retry (bounded):
+                    # immune to undocumented per-request range limits, and
+                    # costs ZERO extra requests when data is present.
+                    narrowed = True
+                    window_end = page_start + max(
+                        (window_end - page_start) // 2, 10 * interval
+                    )
                 fresh = []
                 for c in batch:
                     if cs <= c.ts < ce and c.ts not in seen_ts:
@@ -355,9 +410,12 @@ class Downloader:
                            chunk=i + 1, chunks_total=len(all_chunks),
                            page_start=data_ts_iso(page_start),
                            candles=len(new_candles) + len(chunk_candles))
-                if len(batch) < CANDLES_PER_PAGE:
-                    break  # data edge reached
-                page_start = window_end
+                if not narrowed and len(batch) < CANDLES_PER_PAGE:
+                    break  # full-width window short/empty: data edge reached
+                # narrowed: advance by the narrow window that was answered;
+                # if even it came back EMPTY, jump to the full window end so
+                # a truly-empty region is not crawled 10 candles at a time.
+                page_start = full_end if (narrowed and not batch) else window_end
 
             if not chunk_candles:
                 covered[key] = "empty"
@@ -391,13 +449,31 @@ class Downloader:
             combined = df_new
 
         if len(combined) == 0:
-            task.status = "EMPTY"
+            # Zero data is NEVER a success: it is a hard failure with a
+            # diagnostic (exact requests seen + suggested probe command).
+            task.status = "ERROR"
             task.rows = 0
+            seen = empty_reqs[-3:] if empty_reqs else [
+                "all chunk windows returned no data"
+            ]
+            task.error = (
+                f"exchange returned ZERO candles for {pair} {tf} over "
+                f"{data_ts_iso(data_start)} .. {end_ts_iso(end_ts)}\n"
+                f"  last empty responses: {' | '.join(seen)}\n"
+                f"  possible causes:\n"
+                f"   1. Nobitex minute-level (5m/15m) history for this pair "
+                f"may be shorter than documented (minute candles are "
+                f"documented only from ~2022-03-20)\n"
+                f"   2. the pair did not trade in that range (list it with "
+                f"'markets')\n"
+                f"   3. an API range limitation\n"
+                f"  diagnose with a raw probe (public endpoint only):\n"
+                f"   python -m nobitex_adapter ohlcv-probe --pair {pair} "
+                f"--timeframe {tf} --start {req.start:%Y-%m-%d} "
+                f"--end {req.end:%Y-%m-%d}"
+            )
             self._emit(event="task_empty", pair=pair, timeframe=tf,
-                       reason="exchange returned no candles for the requested "
-                              "range — pair may not exist on Nobitex or the "
-                              "range predates its data (minute candles start "
-                              "~2022-03-20); run 'Check Markets' to confirm")
+                       reason=task.error)
             self._save_report(req, pair, tf, None, task)
             return task
 

@@ -25,20 +25,15 @@ def _now_iso() -> str:
 
 
 def _tfs(value: Any) -> list[str]:
-    """Normalize a timeframes param to a list (accepts list OR 'a,b,c' str).
+    """Normalize a timeframes param via the canonical boundary.
 
-    The GUI sends a JSON array, but direct API callers may send a
-    comma-separated string; without this, a string would be iterated
-    character-by-character ('5m' -> ['5','m']) and silently break the job.
+    Delegates to ``timeframes.normalize_timeframes`` — the same boundary
+    the CLI uses, so the GUI cannot char-split a string ('1d' -> ['1','d'])
+    and invalid values fail with a clear, actionable error.
     """
-    if isinstance(value, str):
-        return [t.strip() for t in value.replace(";", ",").split(",") if t.strip()]
-    if isinstance(value, (list, tuple)):
-        out: list[str] = []
-        for t in value:
-            out.extend(_tfs(t))  # tolerate nested strings/elements
-        return out
-    raise ValueError(f"timeframes must be a list or comma string, got {type(value).__name__}")
+    from .timeframes import normalize_timeframes
+
+    return normalize_timeframes(value, param_name="timeframes")
 
 
 @dataclass

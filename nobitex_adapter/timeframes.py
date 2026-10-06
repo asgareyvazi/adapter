@@ -103,6 +103,93 @@ def parse_timeframe(tf: str) -> Timeframe:
     return Timeframe(tf=tf, seconds=amount * mult)
 
 
+# --------------------------------------------------------------------------
+# Canonical timeframe-list normalization (THE boundary for every input form)
+# --------------------------------------------------------------------------
+
+_TF_ITEM_RE = re.compile(r"^\d+[mhdw]$")
+
+
+def normalize_timeframes(value: object, *, param_name: str = "timeframes") -> list[str]:
+    """Normalize any timeframe input to a canonical ``list[str]``.
+
+    This is the SINGLE boundary every caller (CLI, GUI jobs, download
+    request, tests) must use. Rules:
+
+    * ``"5m"``                 -> ``["5m"]``
+    * ``"5m,15m,1h"``          -> ``["5m", "15m", "1h"]``
+    * ``"5m 15m 1h"``          -> ``["5m", "15m", "1h"]``  (shells may
+      space-join what the user typed as a comma list, e.g. PowerShell's
+      comma-array expansion)
+    * ``["5m", "15m"]`` / ``("5m", "15m")`` / any iterable of strings
+      -> normalized, deduplicated, order preserved
+    * whitespace is trimmed; comma/semicolon/space all separate items
+    * a string is NEVER iterated character-by-character — ``"1d"`` can
+      only ever become ``["1d"]``, never ``["1", "d"]``
+    * every item must be a valid, Nobitex-supported timeframe, otherwise
+      ``TimeframeError`` is raised with the raw received value so the
+      problem is visible at a glance
+    """
+    # -- collect candidate items without ever iterating a str for characters
+    items: list[str] = []
+
+    def _add_token(token: object) -> None:
+        if isinstance(token, (list, tuple, set, frozenset)):
+            for sub in token:
+                _add_token(sub)
+            return
+        if not isinstance(token, str):
+            raise TimeframeError(
+                f"invalid timeframe item {token!r} in {param_name} "
+                f"(expected strings like '5m', '15m', '1h', '4h', '1d')"
+            )
+        # explicit delimiters only — never a bare character iteration
+        for part in re.split(r"[,;\s]+", token.strip()):
+            if part:
+                items.append(part.lower())
+
+    if isinstance(value, str):
+        _add_token(value)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for v in value:
+            _add_token(v)
+    else:
+        raise TimeframeError(
+            f"invalid {param_name} value {value!r} "
+            f"(expected a string like '5m,15m,1h,4h,1d' or a list of timeframes)"
+        )
+
+    # -- dedupe, preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in items:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+
+    # -- validate every item (clear, actionable errors)
+    bad = [t for t in out if not _TF_ITEM_RE.match(t)]
+    if bad:
+        raise TimeframeError(
+            f"invalid timeframe {bad[0]!r} in {param_name}={out!r}\n"
+            f"  each item must look like 5m / 15m / 1h / 4h / 1d "
+            f"(number + m/h/d)\n"
+            f"  NOTE: if you typed --timeframes 5m,15m,1h,4h,1d in PowerShell "
+            f"without quotes,\n"
+            f"        quote the whole list: --timeframes \"5m,15m,1h,4h,1d\""
+        )
+    unsupported = [t for t in out if t not in NOBITEX_RESOLUTIONS]
+    if unsupported:
+        raise TimeframeError(
+            f"timeframe {unsupported[0]!r} is not supported by Nobitex "
+            f"(got {param_name}={out!r})\n"
+            f"  supported: {', '.join(SUPPORTED_TIMEFRAMES)}"
+        )
+    if not out:
+        raise TimeframeError(f"no timeframes given in {param_name}={value!r}")
+    return out
+
+
 def to_nobitex_resolution(tf: str) -> str:
     """Convert a freqtrade timeframe to the Nobitex resolution string."""
     t = parse_timeframe(tf)

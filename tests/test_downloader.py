@@ -32,15 +32,38 @@ def _candles(start_ts: int, n: int, interval: int = 300, price: float = 100.0):
 
 
 class FakeClient:
-    """Stub client whose candles_range returns deterministic candles."""
+    """Stub client with real page semantics over a deterministic candle set.
+
+    Mirrors the documented API: `candles_page` returns one <=500-candle page
+    of [start_ts, end_ts) and raises NobitexNoData when the window has no
+    candles (the documented `s: no_data` answer).
+    """
 
     def __init__(self, candles: list[Candle]):
-        self._candles = candles
+        self._candles = sorted(candles, key=lambda c: c.ts)
         self.calls = 0
 
-    def candles_range(self, symbol, resolution, start_ts, end_ts, **kw):
+    def candles_page(self, symbol, resolution, start_ts, end_ts, page=1, **kw):
         self.calls += 1
-        return [c for c in self._candles if start_ts <= c.ts < end_ts]
+        sel = [c for c in self._candles if start_ts <= c.ts < end_ts]
+        chunk = sel[(page - 1) * CANDLES_PER_PAGE : page * CANDLES_PER_PAGE]
+        if not chunk:
+            raise NobitexNoData("no data", code="NoData")
+        return chunk
+
+    def candles_range(self, symbol, resolution, start_ts, end_ts, **kw):
+        out: list[Candle] = []
+        page = 1
+        while True:
+            try:
+                batch = self.candles_page(symbol, resolution, start_ts, end_ts, page)
+            except NobitexNoData:
+                break
+            out.extend(batch)
+            if len(batch) < CANDLES_PER_PAGE:
+                break
+            page += 1
+        return out
 
 
 def _downloader(tmp_path, client, events=None, stop_event=None) -> Downloader:
@@ -225,12 +248,14 @@ def test_force_ignores_manifest(tmp_path):
     assert s2.tasks[0].chunks_skipped == 0
 
 
-def test_no_data_range_gives_empty_task(tmp_path):
+def test_no_data_range_is_a_hard_failure_with_diagnostics(tmp_path):
+    """Zero candles must NEVER be a silent success: the task is ERROR, the
+    summary is not ok, and the error carries the exact empty requests seen."""
     start, end = _dt("2024-01-01"), _dt("2024-01-02")
 
     class NoDataClient:
-        def candles_range(self, *a, **kw):
-            raise NobitexNoData("no data")
+        def candles_page(self, *a, **kw):
+            raise NobitexNoData("no data", code="NoData")
 
     dl = _downloader(tmp_path, NoDataClient())
     summary = dl.download(DownloadRequest(
@@ -238,8 +263,15 @@ def test_no_data_range_gives_empty_task(tmp_path):
         startup_candles={"5m": 0}, chunk_candles=2000,
         drop_incomplete_last=False, end_is_open=False,
     ))
-    assert summary.tasks[0].status == "EMPTY"
-    assert summary.ok  # empty is a valid outcome, not a failure
+    task = summary.tasks[0]
+    assert task.status == "ERROR"
+    assert not summary.ok
+    assert "ZERO candles" in task.error
+    # the diagnostic shows what was actually requested
+    assert "no_data" in task.error
+    assert "res=5" in task.error  # 5m -> Nobitex resolution "5"
+    # and it points at the raw probe command
+    assert "ohlcv-probe" in task.error
 
 
 def test_cancel_stops_download(tmp_path):
@@ -270,3 +302,74 @@ def test_validation_report_saved_per_dataset(tmp_path):
     assert reports, "expected a validation report file"
     content = reports[0].read_text(encoding="utf-8")
     assert "BTC/USDT" in content
+
+
+# ------------------------------------------------- adaptive narrow windows
+class WideRefusingClient:
+    """Simulates an API that answers no_data for ranges wider than 10
+    candles (5m) but answers narrow windows correctly — i.e. an
+    undocumented per-request range limit. The downloader must still fetch
+    everything via adaptive narrowing."""
+
+    def __init__(self, candles: list[Candle]):
+        self._candles = sorted(candles, key=lambda c: c.ts)
+        self.calls = 0
+
+    def candles_page(self, symbol, resolution, start_ts, end_ts, page=1, **kw):
+        self.calls += 1
+        interval = 300  # 5m
+        if end_ts - start_ts > 10 * interval + interval:
+            raise NobitexNoData("no data (range too wide)", code="NoData")
+        sel = [c for c in self._candles if start_ts <= c.ts < end_ts]
+        if not sel:
+            raise NobitexNoData("no data", code="NoData")
+        return sel
+
+
+def test_adaptive_narrowing_beats_wide_range_limit(tmp_path):
+    """All candles must arrive even though only <=10-candle windows are
+    answered (the 5m/15m-zero-candles defense)."""
+    start, end = _dt("2024-01-01"), _dt("2024-01-02")  # 288 candles of 5m
+    start_ts = int(start.timestamp())
+    client = WideRefusingClient(_candles(start_ts, 288, 300))
+    dl = _downloader(tmp_path, client)
+    summary = dl.download(DownloadRequest(
+        pairs=["BTC/USDT"], timeframes=["5m"], start=start, end=end,
+        startup_candles={"5m": 0}, chunk_candles=2000,
+        drop_incomplete_last=False, end_is_open=False,
+    ))
+    task = summary.tasks[0]
+    assert task.status == "DONE", task.error
+    assert task.rows == 288
+    assert summary.ok
+    # narrowing actually happened (far more requests than 1-2 pages)
+    assert client.calls > 30
+
+
+def test_empty_region_not_crawled_candle_by_candle(tmp_path):
+    """When a region is truly empty (no candles at all), the jump-to-full-
+    window logic must keep the request count low (no 10-candle crawling)."""
+    start, end = _dt("2024-01-01"), _dt("2024-01-08")  # 7 days, all empty
+
+    class AlwaysNoData:
+        def __init__(self):
+            self.calls = 0
+
+        def candles_page(self, symbol, resolution, start_ts, end_ts, page=1, **kw):
+            self.calls += 1
+            raise NobitexNoData("no data", code="NoData")
+
+    client = AlwaysNoData()
+    dl = _downloader(tmp_path, client)
+    summary = dl.download(DownloadRequest(
+        pairs=["BTC/USDT"], timeframes=["5m"], start=start, end=end,
+        startup_candles={"5m": 0}, chunk_candles=2000,
+        drop_incomplete_last=False, end_is_open=False,
+    ))
+    assert summary.tasks[0].status == "ERROR"
+    assert not summary.ok
+    # 7 days of 5m = 2016 candles = ~5 full-width windows; each empty window
+    # costs the bounded narrowing ladder (~7 no_data requests) then jumps to
+    # the full window end. Crawling 10 candles at a time would need 200+.
+    assert client.calls < 60, client.calls
+    assert client.calls < 2016 // 10 // 4  # far below per-candle-group crawling
