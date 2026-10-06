@@ -277,3 +277,28 @@ def test_backtest_precheck_missing_data_reports_clear_error(tmp_path, mock_serve
         text = "\n".join(log)
         assert "required data is missing" in text
         assert "SOL_USDT-5m.feather" in text
+
+
+# ------------------------------------------------------------- _tfs helper
+@pytest.mark.unit
+def test_tfs_accepts_list():
+    from nobitex_adapter.jobs import _tfs
+
+    assert _tfs(["5m", "1h"]) == ["5m", "1h"]
+
+
+@pytest.mark.unit
+def test_tfs_accepts_comma_string():
+    from nobitex_adapter.jobs import _tfs
+
+    assert _tfs("5m,15m,1h") == ["5m", "15m", "1h"]
+    assert _tfs("5m; 1h") == ["5m", "1h"]
+    assert _tfs("5m") == ["5m"]  # the bug that would have given ['5','m']
+
+
+@pytest.mark.unit
+def test_tfs_rejects_bad_type():
+    from nobitex_adapter.jobs import _tfs
+
+    with pytest.raises(ValueError):
+        _tfs(5)

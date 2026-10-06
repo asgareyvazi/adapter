@@ -24,6 +24,23 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _tfs(value: Any) -> list[str]:
+    """Normalize a timeframes param to a list (accepts list OR 'a,b,c' str).
+
+    The GUI sends a JSON array, but direct API callers may send a
+    comma-separated string; without this, a string would be iterated
+    character-by-character ('5m' -> ['5','m']) and silently break the job.
+    """
+    if isinstance(value, str):
+        return [t.strip() for t in value.replace(";", ",").split(",") if t.strip()]
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for t in value:
+            out.extend(_tfs(t))  # tolerate nested strings/elements
+        return out
+    raise ValueError(f"timeframes must be a list or comma string, got {type(value).__name__}")
+
+
 @dataclass
 class Job:
     id: str
@@ -165,8 +182,9 @@ def make_download_job(paths: dict, job: Job) -> None:
     from .cli import _parse_dt, _parse_pairs
 
     p = job.params
+    tfs = _tfs(p["timeframes"])
     client = NobitexClient()
-    job.add_log(f"[info] Downloading {len(p['pairs'])} pairs x {len(p['timeframes'])} timeframes")
+    job.add_log(f"[info] Downloading {len(_parse_pairs(p['pairs']))} pairs x {len(tfs)} timeframes")
     try:
         summary = Downloader(
             client, paths["datadir"], paths["manifests_dir"], paths["reports_dir"],
@@ -174,7 +192,7 @@ def make_download_job(paths: dict, job: Job) -> None:
             stop_event=job.stop_event,
         ).download(DownloadRequest(
             pairs=_parse_pairs(p["pairs"]),
-            timeframes=p["timeframes"],
+            timeframes=tfs,
             start=_parse_dt(p["start"]),
             end=_parse_dt(p.get("end", "now"), default_now=True),
             exchange="nobitex",
@@ -194,12 +212,13 @@ def make_validate_job(paths: dict, job: Job) -> None:
     from .cli import _parse_dt, _parse_pairs
 
     p = job.params
-    job.add_log(f"[info] Validating {len(p['pairs'])} pairs x {len(p['timeframes'])} timeframes")
+    tfs = _tfs(p["timeframes"])
+    job.add_log(f"[info] Validating {len(_parse_pairs(p['pairs']))} pairs x {len(tfs)} timeframes")
     dl = Downloader(None, paths["datadir"], paths["manifests_dir"], paths["reports_dir"])  # type: ignore[arg-type]
     reports = dl.validate_dataset(
         exchange="nobitex",
         pairs=_parse_pairs(p["pairs"]),
-        timeframes=p["timeframes"],
+        timeframes=tfs,
         start=_parse_dt(p["start"]),
         end=_parse_dt(p.get("end", "now"), default_now=True),
         end_is_open=bool(p.get("end_is_open", True)),

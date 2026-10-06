@@ -35,9 +35,10 @@ duplicated.
 
 | Path | What it is |
 | --- | --- |
-| `nobitex_adapter/` | The adapter package (client, downloader, validator, ccxt exchange class, config generator, backtest runner, results parser, job manager, mock API server) |
+| `nobitex_adapter/` | The adapter package (client, downloader, validator, ccxt exchange class, config generator, backtest runner, results parser, job manager, mock API server, **runtime binding**) |
+| `nobitex_adapter/runtime.py` | Stdlib-only runtime layer: venv discovery, probe, re-exec, `doctor` diagnostic |
 | `nobitex_adapter/webui/` | FastAPI app + dependency-free static UI (dark, RTL/farsi + English) |
-| `tests/` | 154 tests: unit, integration (against the in-repo mock API), e2e (real Freqtrade + X8) |
+| `tests/` | 184 tests: unit, integration (against the in-repo mock API), e2e (real Freqtrade + X8) |
 | `user_data/strategies/NostalgiaForInfinityX8.py` | The real X8 strategy, **unmodified** (provenance in `STRATEGY_SOURCE.txt`) |
 | `user_data/nobitex_gui/` | Generated run configs, job state, logs, saved dashboards (git-ignored) |
 | `user_data/data/nobitex/` | Downloaded feather data (git-ignored) |
@@ -90,7 +91,95 @@ python -m nobitex_adapter --help
 
 ---
 
-## 2. Quickstart — the GUI (Backtest Manager)
+## 2. Runtime architecture — which Freqtrade runs the backtest
+
+**The rule: a backtest always runs on the Freqtrade that belongs to the
+selected Freqtrade repository — never on a "leftover" Freqtrade in whatever
+happens to be the active Python.**
+
+### Why this exists
+
+The adapter can be launched by *any* Python (system Python, the adapter's
+own venv, the GUI host). Before this repair, `--repo` only controlled file
+paths, while Freqtrade was imported **in the adapter's own process** — so a
+user whose Freqtrade repo `.venv` has `2026.9-dev` could silently get a
+backtest on the system Python's `2026.8` (version mismatch, different
+strategy semantics, different results).
+
+### How it works (design decision, documented)
+
+Four options were evaluated:
+
+| Option | Verdict |
+| --- | --- |
+| A. "Run the adapter from the repo venv" (user must activate it) | Fragile: depends on the user remembering to activate the right venv; GUI host and backtest runtime still could diverge. |
+| B. A separate launcher program | Duplicates entry points; two places to keep in sync. |
+| **C. Transparent re-exec into the repo's venv (CHOSEN)** | The adapter stays a single entry point; the *process* that runs Freqtrade is provably the repo's venv; zero changes to Freqtrade core; zero duplicated trees. |
+| D. Install the adapter inside the repo venv | Couples the adapter to one specific repo; breaks when the user has several repos. |
+
+Mechanics (all in `nobitex_adapter/runtime.py`, stdlib-only):
+
+1. **Discovery** — `find_venv_python(<repo>)` looks for `.venv/bin/python`
+   (POSIX) or `.venv/Scripts/python.exe` (Windows) *inside the selected repo*
+   only. No guessing, no walking upward.
+2. **Probe** — a short subprocess runs the venv's Python and reports JSON:
+   Python version, Freqtrade version + module path, CCXT version. This is
+   the *selected* runtime, verified, not assumed.
+3. **Bind** — for `backtest --repo X`, the CLI re-execs **itself** with that
+   venv's Python *before any Freqtrade import* (`sys.argv` preserved,
+   `PYTHONPATH` set to the adapter root). You see it in the log:
+   `[runtime] re-executing with selected Freqtrade runtime: …`.
+4. **Environment identity** — "already in the right runtime" is decided by
+   comparing the **resolved Freqtrade module path**, not the executable path
+   (a venv's `bin/python` is a *symlink to the base interpreter*, so path
+   comparison is wrong). Same environment → no re-exec; different → re-exec.
+5. **Proof, not assumption** — every backtest result (CLI `--out` JSON, GUI
+   job details) carries a `runtime` block: `python`, `python_version`,
+   `freqtrade`, `freqtrade_module`, `ccxt`, `adapter_version`. The GUI job
+   log also contains the re-exec line, so you can audit which Freqtrade ran.
+
+**`doctor`** prints the full diagnostic at any time:
+
+```bash
+# Linux/macOS
+python -m nobitex_adapter --repo /path/to/freqtrade doctor
+# Windows PowerShell (docs-only example — no Windows path is hardcoded in logic)
+python -m nobitex_adapter --repo C:\Users\A-Eyvazi\Desktop\New\ folder\freqtrade doctor
+```
+
+Output: host runtime (GUI/CLI process) **and** selected runtime
+(repo → `.venv` python → Freqtrade version + module path → CCXT).
+
+**GUI**: the repo field at the top of the settings panel binds the whole
+session; a runtime chip shows the *backtest* runtime (green = verified
+venv found, yellow = fallback). Switching repos at runtime is a single
+`POST /api/repo` — data/GUI keep running, backtests follow the new venv.
+
+### Strategy discovery (deterministic, documented)
+
+1. The **selected repo's** `user_data/strategies` — searched recursively, so
+   nested strategy-repo layouts work out of the box, e.g.
+   `user_data/strategies/NostalgiaForInfinity/NostalgiaForInfinityX8.py`
+   (NFI cloned as a subfolder). Shallowest match wins; ties break
+   lexicographically; `__pycache__`/hidden dirs are skipped.
+   For nested layouts the adapter exposes a **symlink** named
+   `NostalgiaForInfinityX8.py` in the flat strategies dir so Freqtrade can
+   import it — it never copies or overwrites an existing real file, and it
+   never touches anything under `NostalgiaForInfinity/configs/`.
+2. The **adapter checkout's bundled** `user_data/strategies` (fallback,
+   announced with a `bundled fallback` note in logs/UI).
+
+### X8 requirements are derived, not hardcoded
+
+`detect_strategy_timeframes()` parses the strategy source: `timeframe`
+(5m), `info_timeframes` (15m/1h/4h/1d), `btc_info_timeframes` (4h) and
+`startup_candle_count` (800). The pre-check uses the **strategy's own**
+`startup_candle_count` to verify warmup history and warns on shortfalls.
+A different strategy with different needs works without code changes.
+
+---
+
+## 3. Quickstart — the GUI (Backtest Manager)
 
 ```bash
 # Linux/macOS
@@ -103,6 +192,12 @@ python -m nobitex_adapter ui --host 0.0.0.0 --port 8765
 
 Open **http://localhost:8765** and follow the 5 steps:
 
+0. **Freqtrade repo** (top of settings) — paste your Freqtrade clone path
+   (the one with `.venv/` + `user_data/`). A runtime chip verifies the
+   venv's Freqtrade; **backtests run on that venv**, while data + GUI keep
+   running in the GUI host Python. Switch repos anytime — it rebinds
+   instantly (`POST /api/repo`). If left blank, the GUI host's own Python is
+   used (must have Freqtrade).
 1. **Check Markets** — discovers USDT markets from `GET /market/stats`
    (deterministic `BASE/QUOTE` normalization; closed markets flagged).
 2. **Pairs & Timeframes** — search/select (or "recommended" top-50 by 24h
@@ -140,7 +235,7 @@ $env:NOBITEX_API_BASE="http://127.0.0.1:8900"; python -m nobitex_adapter ui --po
 
 ---
 
-## 3. Quickstart — the CLI
+## 4. Quickstart — the CLI
 
 The same services, scriptable:
 
@@ -161,26 +256,34 @@ python -m nobitex_adapter validate \
     --start 2024-01-01 --end 2024-03-31
 
 # backtest with X8 (spot, dry-run, 10k USDT, fee 0.2%)
-python -m nobitex_adapter backtest \
+# --repo BINDS the backtest to that Freqtrade clone's .venv (see §2):
+# the process that runs Freqtrade is provably the repo's venv.
+python -m nobitex_adapter --repo /path/to/freqtrade backtest \
     --strategy NostalgiaForInfinityX8 \
     --pairs BTC/USDT,ETH/USDT,SOL/USDT \
     --start 2024-01-01 --end 2024-03-31 \
-    --capital 10000 --stake unlimited --max-open 8 --fee 0.002
+    --capital 10000 --stake unlimited --max-open 8 --fee 0.002 \
+    --out results.json      # machine-readable descriptor incl. a `runtime` block
+
+# what runtime would this command use? (host + selected, versions + paths)
+python -m nobitex_adapter --repo /path/to/freqtrade doctor
 
 # Windows PowerShell equivalents — same commands, backslash→newline via ``
-python -m nobitex_adapter download `
+python -m nobitex_adapter --repo C:\Users\A-Eyvazi\Desktop\New\ folder\freqtrade backtest `
+    --strategy NostalgiaForInfinityX8 `
     --pairs BTC/USDT,ETH/USDT,SOL/USDT `
-    --timeframes 5m,15m,1h,4h,1d `
     --start 2024-01-01 --end 2024-03-31
 ```
 
-Useful flags: `download --force` (ignore resume manifest), `--startup
-5m:850,1d:260` (per-tf lead-in overrides), `--keep-incomplete`; `backtest
---out results.json` (machine-readable result descriptor), `--skip-precheck`.
+Useful flags: `--repo` (bind backtest to a Freqtrade clone's `.venv`; global
+option, before the subcommand), `doctor` (runtime diagnostic); `download
+--force` (ignore resume manifest), `--startup 5m:850,1d:260` (per-tf lead-in
+overrides), `--keep-incomplete`; `backtest --out results.json`
+(machine-readable result descriptor incl. `runtime`), `--skip-precheck`.
 
 ---
 
-## 4. X8 data requirements (auto-handled)
+## 5. X8 data requirements (auto-handled)
 
 `NostalgiaForInfinityX8` (pinned copy in `user_data/strategies/`, see
 `STRATEGY_SOURCE.txt` for commit + SHA-256) requires:
@@ -204,7 +307,7 @@ informative indicators are fully warmed before the timerange start.
 
 ---
 
-## 5. Data quality guarantees
+## 6. Data quality guarantees
 
 Every downloaded dataset is validated **strictly** and a JSON + human report
 is written per pair/timeframe:
@@ -230,7 +333,7 @@ candle rejection with full request context, cancellation at chunk boundaries.
 
 ---
 
-## 6. Tests
+## 7. Tests
 
 ```bash
 # everything (unit + integration vs in-repo mock + full X8 e2e, ~90 s)
@@ -254,9 +357,20 @@ lifecycle (discover → download → validate → backtest-subprocess → result
 incl. cancel), and a **full-pipeline e2e** running the unmodified X8
 strategy on a small controlled range end to end.
 
+**Runtime-binding tests** (`test_runtime.py`, `test_strategy_discovery.py`,
+`test_e2e_runtime.py`): venv discovery (POSIX + Windows layouts), runtime
+probe, `resolve_runtime` error paths, re-exec environment-identity (no
+re-exec when already in the venv), `doctor`/diagnostic output, deterministic
+strategy discovery (nested NFI layout, flat-wins-over-nested, bundled
+fallback, `__pycache__`/hidden skipping), and the **cross-interpreter
+proof**: a Freqtrade-less Python launched with `--repo` re-execs and runs the
+backtest on the repo's venv Freqtrade, with the exact runtime recorded in
+the result; plus GUI repo binding (`/api/runtime`, `POST /api/repo`, job →
+bound runtime).
+
 ---
 
-## 7. Nobitex public API audit
+## 8. Nobitex public API audit
 
 The authoritative audit of the documented public API — endpoint-by-endpoint
 capability matrix, rate limits, data-availability limits, response shapes,
@@ -278,7 +392,7 @@ Key facts (details + sources in the matrix):
 
 ---
 
-## 8. Architecture notes
+## 9. Architecture notes
 
 * **ccxt integration without forking Freqtrade**: `ccxt_nobitex.Nobitex`
   registers into ccxt's sync + async (ccxt.pro) registries; public
@@ -287,6 +401,10 @@ Key facts (details + sources in the matrix):
 * **One backtest implementation**: `run_backtest()` is shared by CLI, GUI
   (subprocess job) and tests. GUI backtests run in a **subprocess** for
   clean Freqtrade globals and robust cancellation (process kill).
+* **Runtime binding**: the CLI re-execs into the selected repo's `.venv`
+  before importing Freqtrade (§2). The GUI host may run anywhere; each
+  backtest job subprocess re-binds to the *selected* repo's venv. The
+  `runtime` block in every result is the audit trail of which Freqtrade ran.
 * **Results layer**: `results.parse_backtest_zip()` converts Freqtrade's
   results zip (stats JSON + wallet feather) into a stable dashboard payload;
   per-pair **buy-&-hold** is computed from the downloaded base-timeframe data
@@ -295,10 +413,14 @@ Key facts (details + sources in the matrix):
   ccxt class (keys via env), a `trading_mode: futures` config path already
   exists in `configgen`/symbols, and the job manager generalizes to live jobs.
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |
+| `[runtime] ERROR: Selected .venv does not exist: …` (exit 2) | `--repo` points at a dir without a Freqtrade `.venv`. Point it at your real Freqtrade clone (the one with `.venv/`), or activate/`pip install -e .` a Freqtrade env |
+| Backtest ran, but `runtime` shows a Freqtrade version I didn't expect | The GUI/CLI host had its own Freqtrade and no `--repo`/repo-v was selected, so it fell back. Select the intended repo (CLI `--repo` or GUI repo field) and check the `runtime` block |
+| `Freqtrade is not installed in selected .venv` | The repo's venv is incomplete. Inside that venv: `pip install -e .` (the Freqtrade repo) or `pip install freqtrade` |
+| Two Pythons, two Freqtrade versions, which ran? | Trust the `runtime` block in the result JSON / GUI job details (`freqtrade_module` path). The re-exec log line `[runtime] re-executing …` confirms the switch |
 | `required data is missing: …` before backtest | Run `download` with the printed pair/timeframes (or use the GUI Download step) |
 | Backtest start clamped to 2022-03-20+ | Nobitex minute-candle history limit — start later |
 | `rate limited … backOff=2` in logs | Normal — the client honors the server `backOff` and retries |

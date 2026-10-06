@@ -63,7 +63,9 @@ def detect_strategy_timeframes(strategy_file: Path) -> dict:
     m = re.search(r"^\s*btc_info_timeframes\s*=\s*\[([^\]]*)\]", src, re.M)
     if m:
         out["btc_info_timeframes"] = re.findall(r"[\"']([^\"']+)[\"']", m.group(1))
-    m = re.search(r"^\s*startup_candle_count\s*=\s*(\d+)", src, re.M)
+    # X8 declares it annotated: `startup_candle_count: int = 800`
+    m = re.search(r"^\s*startup_candle_count\s*(?::\s*[\w\[\]]+\s*)?=\s*(\d+)",
+                  src, re.M)
     if m:
         out["startup_candle_count"] = int(m.group(1))
     return out
