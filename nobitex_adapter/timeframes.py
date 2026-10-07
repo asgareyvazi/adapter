@@ -33,10 +33,34 @@ NOBITEX_RESOLUTIONS: dict[str, str] = {
 # Reverse map: resolution -> timeframe
 _RESOLUTION_TO_TF = {v: k for k, v in NOBITEX_RESOLUTIONS.items()}
 
+# AZBit `interval` values, exactly as documented
+# (https://data.azbit.com/docs/ -> GET /api/ohlc, and
+# https://docs.azbit.com/docs/spot/tickers/):
+#   year, month, day, hour4, hour, minutes30, minutes15, minutes5,
+#   minutes3, minute
+# Only the subset below maps 1:1 onto Freqtrade timeframes; AZBit has no
+# 3h/6h/12h/2d/3d equivalents (no blind hardcode — unsupported timeframes
+# raise TimeframeError when exchange="azbit").
+AZBIT_INTERVALS: dict[str, str] = {
+    "1m": "minute",
+    "5m": "minutes5",
+    "15m": "minutes15",
+    "30m": "minutes30",
+    "1h": "hour",
+    "4h": "hour4",
+    "1d": "day",
+}
+
+# Reverse map: azbit interval -> timeframe
+_INTERVAL_TO_TF = {v: k for k, v in AZBIT_INTERVALS.items()}
+
 _TF_RE = re.compile(r"^(\d+)([mhdw])$")
 
 # Timeframes the adapter supports end-to-end (download + validation + backtest).
 SUPPORTED_TIMEFRAMES = tuple(NOBITEX_RESOLUTIONS.keys())
+
+# Timeframes AZBit can serve (subset — AZBit has no 3h/6h/12h/2d/3d).
+AZBIT_SUPPORTED_TIMEFRAMES = tuple(AZBIT_INTERVALS.keys())
 
 # Timeframes required by NostalgiaForInfinityX8 (base + informative per pair)
 X8_BASE_TIMEFRAME = "5m"
@@ -110,7 +134,12 @@ def parse_timeframe(tf: str) -> Timeframe:
 _TF_ITEM_RE = re.compile(r"^\d+[mhdw]$")
 
 
-def normalize_timeframes(value: object, *, param_name: str = "timeframes") -> list[str]:
+def normalize_timeframes(
+    value: object,
+    *,
+    param_name: str = "timeframes",
+    exchange: str | None = None,
+) -> list[str]:
     """Normalize any timeframe input to a canonical ``list[str]``.
 
     This is the SINGLE boundary every caller (CLI, GUI jobs, download
@@ -126,9 +155,14 @@ def normalize_timeframes(value: object, *, param_name: str = "timeframes") -> li
     * whitespace is trimmed; comma/semicolon/space all separate items
     * a string is NEVER iterated character-by-character — ``"1d"`` can
       only ever become ``["1d"]``, never ``["1", "d"]``
-    * every item must be a valid, Nobitex-supported timeframe, otherwise
-      ``TimeframeError`` is raised with the raw received value so the
-      problem is visible at a glance
+    * every item must be a valid timeframe supported by the selected
+      exchange, otherwise ``TimeframeError`` is raised with the raw
+      received value so the problem is visible at a glance
+
+    ``exchange`` selects the support set: ``"azbit"`` validates against
+    the AZBit interval map, anything else (``None``/``"nobitex"``)
+    against the Nobitex resolution map. The default preserves the exact
+    historical Nobitex behavior.
     """
     # -- collect candidate items without ever iterating a str for characters
     items: list[str] = []
@@ -178,12 +212,20 @@ def normalize_timeframes(value: object, *, param_name: str = "timeframes") -> li
             f"without quotes,\n"
             f"        quote the whole list: --timeframes \"5m,15m,1h,4h,1d\""
         )
-    unsupported = [t for t in out if t not in NOBITEX_RESOLUTIONS]
+    if (exchange or "nobitex").lower() == "azbit":
+        supported_map: dict[str, str] = AZBIT_INTERVALS
+        supported_names = AZBIT_SUPPORTED_TIMEFRAMES
+        exchange_label = "AZBit"
+    else:
+        supported_map = NOBITEX_RESOLUTIONS
+        supported_names = SUPPORTED_TIMEFRAMES
+        exchange_label = "Nobitex"
+    unsupported = [t for t in out if t not in supported_map]
     if unsupported:
         raise TimeframeError(
-            f"timeframe {unsupported[0]!r} is not supported by Nobitex "
+            f"timeframe {unsupported[0]!r} is not supported by {exchange_label} "
             f"(got {param_name}={out!r})\n"
-            f"  supported: {', '.join(SUPPORTED_TIMEFRAMES)}"
+            f"  supported: {', '.join(supported_names)}"
         )
     if not out:
         raise TimeframeError(f"no timeframes given in {param_name}={value!r}")
@@ -204,6 +246,29 @@ def from_nobitex_resolution(resolution: str) -> str:
         raise TimeframeError(
             f"unknown Nobitex resolution {resolution!r} "
             f"(known: {', '.join(sorted(_RESOLUTION_TO_TF))})"
+        ) from exc
+
+
+def to_azbit_interval(tf: str) -> str:
+    """Convert a freqtrade timeframe to the AZBit `interval` string."""
+    t = parse_timeframe(tf)
+    try:
+        return AZBIT_INTERVALS[t.tf]
+    except KeyError as exc:
+        raise TimeframeError(
+            f"timeframe {t.tf!r} has no AZBit interval "
+            f"(supported: {', '.join(AZBIT_SUPPORTED_TIMEFRAMES)})"
+        ) from exc
+
+
+def from_azbit_interval(interval: str) -> str:
+    """Convert an AZBit `interval` to a freqtrade timeframe."""
+    try:
+        return _INTERVAL_TO_TF[interval]
+    except KeyError as exc:
+        raise TimeframeError(
+            f"unknown AZBit interval {interval!r} "
+            f"(known: {', '.join(sorted(_INTERVAL_TO_TF))})"
         ) from exc
 
 

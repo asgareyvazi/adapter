@@ -1,11 +1,12 @@
-"""Historical OHLCV download engine.
+"""Historical OHLCV download engine (multi-exchange).
 
-Turns Nobitex `/market/udf/history` responses (<=500 candles/page) into
-Freqtrade-compatible feather files, with:
+Turns a provider's paginated OHLCV windows (Nobitex
+`/market/udf/history` <=500 candles/page, AZBit `/api/ohlc` ~1000
+rows/response) into Freqtrade-compatible feather files, with:
 
-  * time chunking (default 2000 candles/chunk => a few pages per chunk)
-  * page-level pagination inside each chunk
-  * retry / timeout / rate limiting (in NobitexClient)
+  * time chunking (default 2000 candles/chunk => a few windows per chunk)
+  * provider-side pagination inside each window (page walk / cursor walk)
+  * retry / timeout / rate limiting (in the exchange client)
   * duplicate removal + chronological ordering
   * malformed-candle detection (client + validator)
   * missing-candle / gap detection (validator report)
@@ -13,6 +14,12 @@ Freqtrade-compatible feather files, with:
   * deterministic output (feather, UTC, freqtrade column layout)
   * resume: chunk coverage is recorded in a manifest so unchanged ranges
     are skipped (no blind re-download)
+
+The engine talks to ``providers.ExchangeProvider`` only — no
+provider-specific syntax (``BTCUSDT`` vs ``BTC_USDT``, ``5`` vs
+``minutes5``) appears below. A bare ``NobitexClient`` (or a test fake
+with ``candles_page``) is still accepted and wrapped automatically, so
+all historical call sites keep working unchanged.
 """
 from __future__ import annotations
 
@@ -27,14 +34,18 @@ from typing import Callable, Optional
 
 import pandas as pd
 
-from .nobitex_client import NobitexClient, NobitexError, NobitexNoData
-from .timeframes import DEFAULT_STARTUP_CANDLES, parse_timeframe, to_nobitex_resolution
+from .nobitex_client import NobitexError
+from .timeframes import DEFAULT_STARTUP_CANDLES, parse_timeframe
 from .validator import ValidationReport, validate
 
 log = logging.getLogger("nobitex.download")
 
-CANDLES_PER_PAGE = 500  # documented max per /market/udf/history response
-DEFAULT_CHUNK_CANDLES = 2000  # 4 pages per chunk -> resume granularity
+# Window sizing for the adaptive fetch loop (candles per window). Nobitex
+# answers <=500/page (documented) and AZBit ~1000/response (observed), so
+# 500-candle windows cost ~1 request on either exchange; the provider
+# paginates internally when a window needs more than one response.
+CANDLES_PER_PAGE = 500
+DEFAULT_CHUNK_CANDLES = 2000  # 4 windows per chunk -> resume granularity
 
 
 def pair_to_filename(pair: str) -> str:
@@ -78,9 +89,12 @@ class DownloadRequest:
         if not self.pairs:
             raise ValueError("no pairs given")
         # canonical boundary: normalize timeframes even for programmatic use
+        # (exchange-aware: AZBit supports a subset of the Nobitex set)
         from .timeframes import normalize_timeframes
 
-        self.timeframes = normalize_timeframes(self.timeframes, param_name="timeframes")
+        self.timeframes = normalize_timeframes(
+            self.timeframes, param_name="timeframes", exchange=self.exchange
+        )
         s, e = _dt_to_ts(self.start), _dt_to_ts(self.end)
         if e <= s:
             raise ValueError("end must be after start")
@@ -151,14 +165,31 @@ ProgressCb = Callable[[dict], None]
 class Downloader:
     def __init__(
         self,
-        client: NobitexClient,
+        client,
         datadir: Path,
         manifest_dir: Path,
         report_dir: Optional[Path] = None,
         progress_cb: Optional[ProgressCb] = None,
         stop_event: Optional[threading.Event] = None,
     ) -> None:
-        self.client = client
+        """`client` is an ``ExchangeProvider`` — or, for backward
+        compatibility, a legacy ``NobitexClient`` / test fake exposing
+        ``candles_page`` (wrapped automatically), or ``None`` for
+        validate-only use (no fetching)."""
+        from .providers.base import ExchangeProvider
+        from .providers.nobitex import NobitexProvider
+
+        if client is None or isinstance(client, ExchangeProvider):
+            self.provider = client
+            self.client = client
+        elif hasattr(client, "candles_page"):
+            self.provider = NobitexProvider(client=client)
+            self.client = client
+        else:
+            raise TypeError(
+                f"Downloader expects an ExchangeProvider (or a legacy client "
+                f"with candles_page), got {type(client).__name__}"
+            )
         self.datadir = Path(datadir)
         self.manifest_dir = Path(manifest_dir)
         self.report_dir = Path(report_dir) if report_dir else self.manifest_dir.parent / "reports"
@@ -290,43 +321,27 @@ class Downloader:
 
     def _fetch_window(
         self,
-        sym: str,
-        resolution: str,
+        pair: str,
+        tf: str,
         start_ts: int,
         end_ts: int,
         empty_reqs: list[str],
     ) -> list:
-        """Fetch [start_ts, end_ts) via <=500-candle pages.
+        """Fetch ALL of [start_ts, end_ts) via the provider.
 
-        Returns candles (possibly empty). Every empty response is recorded
-        in ``empty_reqs`` with its exact request context so a zero-data
-        task can be diagnosed instead of failing silently.
+        The provider paginates internally (Nobitex page walk, AZBit cursor
+        walk) and records every empty response in ``empty_reqs`` with its
+        exact request context so a zero-data task can be diagnosed instead
+        of failing silently. Returns candles (possibly empty), ascending.
         """
-        out = []
-        page = 1
-        while True:
-            try:
-                batch = self.client.candles_page(
-                    symbol=sym, resolution=resolution,
-                    start_ts=start_ts, end_ts=end_ts, page=page,
-                )
-            except NobitexNoData:
-                empty_reqs.append(
-                    f"no_data symbol={sym} res={resolution} "
-                    f"from={start_ts} to={end_ts} page={page}"
-                )
-                break
-            out.extend(batch)
-            if len(batch) < CANDLES_PER_PAGE:
-                break
-            page += 1
-        return out
+        assert self.provider is not None, "Downloader has no provider (validate-only)"
+        return self.provider.fetch_window(
+            pair, tf, start_ts, end_ts, empty_notes=empty_reqs
+        )
 
     def _download_one(self, req: DownloadRequest, pair: str, tf: str) -> TaskResult:
         t = parse_timeframe(tf)
         interval = t.seconds
-        resolution = to_nobitex_resolution(tf)
-        sym = pair.replace("/", "")
         path = data_filename(self.datadir, req.exchange, pair, tf)
         manifest_path = self._manifest_path(req, pair, tf)
         empty_reqs: list[str] = []
@@ -387,7 +402,7 @@ class Downloader:
                 narrowed = False
                 while True:
                     batch = self._fetch_window(
-                        sym, resolution, page_start, window_end + interval,
+                        pair, tf, page_start, window_end + interval,
                         empty_reqs,
                     )
                     if any(cs <= c.ts < ce for c in batch) \
@@ -451,26 +466,15 @@ class Downloader:
         if len(combined) == 0:
             # Zero data is NEVER a success: it is a hard failure with a
             # diagnostic (exact requests seen + suggested probe command).
+            # The message is provider-specific (Nobitex vs AZBit causes and
+            # probe commands differ) but the POLICY is shared: zero rows =
+            # ERROR, never a silent success.
+            assert self.provider is not None
             task.status = "ERROR"
             task.rows = 0
-            seen = empty_reqs[-3:] if empty_reqs else [
-                "all chunk windows returned no data"
-            ]
-            task.error = (
-                f"exchange returned ZERO candles for {pair} {tf} over "
-                f"{data_ts_iso(data_start)} .. {end_ts_iso(end_ts)}\n"
-                f"  last empty responses: {' | '.join(seen)}\n"
-                f"  possible causes:\n"
-                f"   1. Nobitex minute-level (5m/15m) history for this pair "
-                f"may be shorter than documented (minute candles are "
-                f"documented only from ~2022-03-20)\n"
-                f"   2. the pair did not trade in that range (list it with "
-                f"'markets')\n"
-                f"   3. an API range limitation\n"
-                f"  diagnose with a raw probe (public endpoint only):\n"
-                f"   python -m nobitex_adapter ohlcv-probe --pair {pair} "
-                f"--timeframe {tf} --start {req.start:%Y-%m-%d} "
-                f"--end {req.end:%Y-%m-%d}"
+            task.error = self.provider.zero_data_error(
+                pair, tf, data_start, end_ts, empty_reqs,
+                f"{req.start:%Y-%m-%d}", f"{req.end:%Y-%m-%d}",
             )
             self._emit(event="task_empty", pair=pair, timeframe=tf,
                        reason=task.error)

@@ -106,6 +106,7 @@ def build_backtest_config(
     user_data_dir: Path,
     datadir: Path,
     strategies_dir: Path,
+    exchange: str = "nobitex",
     stake_currency: str = "USDT",
     initial_capital: float = 10_000.0,
     stake_amount: object = "unlimited",
@@ -128,7 +129,7 @@ def build_backtest_config(
         "initial_capital": float(initial_capital),
         "dry_run_wallet": float(initial_capital),
         "exchange": {
-            "name": "nobitex",
+            "name": exchange,
             "key": "",
             "secret": "",
             "pair_whitelist": list(pairs),

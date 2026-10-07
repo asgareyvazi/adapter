@@ -133,7 +133,7 @@ async function loadPresets() {
 
 // ------------------------------------------------------------------ markets
 async function discover(showLog = true) {
-  const job = await startJob("discover", { quote: "USDT" }, showLog);
+  const job = await startJob("discover", { quote: "USDT", exchange: ($("#exchange") && $("#exchange").value) || "nobitex" }, showLog);
   if (job) {
     state.stepState[1] = "run"; renderSteps();
     const r = await waitJob(job.id);
@@ -260,6 +260,7 @@ function bind() {
 function paramsBase() {
   return {
     strategy: $("#strategy").value,
+    exchange: ($("#exchange") && $("#exchange").value) || "nobitex",
     pairs: Array.from(state.selected).join(","),
     timeframe: $("#timeframe").value,
     timeframes: requiredTfs($("#timeframe").value),

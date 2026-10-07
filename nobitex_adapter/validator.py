@@ -55,6 +55,34 @@ class ValidationReport:
     def ok(self) -> bool:
         return self.status == "PASS"
 
+    @property
+    def quality(self) -> str:
+        """One-word data-quality verdict (gap-handling policy).
+
+        CONTIGUOUS: every candle exactly one interval apart, no defects.
+        GAPPED:     spacing defects (missing intervals / irregular spacing).
+        DUPLICATE:  repeated timestamps (kept-first counting, pre-repair).
+        OUT_OF_ORDER: non-monotonic timestamps.
+        EMPTY:      no rows at all.
+        INVALID:    broken OHLC/volume values (unusable regardless of shape).
+
+        Priority is EMPTY > INVALID > OUT_OF_ORDER > DUPLICATE > GAPPED >
+        CONTIGUOUS so the most severe defect wins; all counters stay
+        visible alongside. Derived from counters only — `status` keeps its
+        exact historical semantics (PASS / PASS_WITH_GAPS / FAIL / ...).
+        """
+        if self.rows == 0:
+            return "EMPTY"
+        if self.invalid_ohlc or self.invalid_volume:
+            return "INVALID"
+        if self.non_monotonic:
+            return "OUT_OF_ORDER"
+        if self.duplicates:
+            return "DUPLICATE"
+        if self.missing_intervals or not self.candle_spacing_ok:
+            return "GAPPED"
+        return "CONTIGUOUS"
+
     def render(self) -> str:
         lines = [
             f"PAIR: {self.pair}",
@@ -81,6 +109,7 @@ class ValidationReport:
             lines.append(f"REPAIRED: {'; '.join(self.repairs)}")
         if self.problems:
             lines.append(f"PROBLEMS: {'; '.join(self.problems)}")
+        lines.append(f"QUALITY: {self.quality}")
         lines.append(f"STATUS: {self.status}")
         return "\n".join(lines)
 
@@ -93,6 +122,7 @@ class ValidationReport:
             "non_monotonic": self.non_monotonic, "gap_ranges": self.gap_ranges[:20],
             "first_ts": self.first_ts, "last_ts": self.last_ts, "timezone": self.timezone,
             "incomplete_last_candle": self.incomplete_last_candle, "repairs": self.repairs,
+            "quality": self.quality,
             "status": self.status, "problems": self.problems,
         }
 

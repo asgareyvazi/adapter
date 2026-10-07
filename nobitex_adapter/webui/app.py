@@ -224,8 +224,10 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
 
     def _data_history() -> list[dict]:
         out = []
-        man = _paths()["manifests_dir"] / "nobitex"
-        if man.is_dir():
+        manifests = _paths()["manifests_dir"]
+        man_dirs = sorted([d for d in manifests.iterdir() if d.is_dir()]) if manifests.is_dir() else []
+        for man in man_dirs:
+            exchange = man.name
             for f in sorted(man.glob("*.json")):
                 try:
                     d = json.loads(f.read_text(encoding="utf-8"))
@@ -246,6 +248,7 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
                 pair = d.get("pair", stem.rsplit("-", 1)[0].replace("_", "/"))
                 tf = d.get("timeframe", stem.rsplit("-", 1)[-1])
                 out.append({
+                    "exchange": exchange,
                     "pair": pair,
                     "timeframe": tf,
                     "range_start": lo_s,
@@ -254,7 +257,7 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
                     "chunks_empty": n_empty,
                     "updated": datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).strftime("%Y-%m-%d"),
                 })
-        out.sort(key=lambda x: (x["pair"], x["timeframe"]))
+        out.sort(key=lambda x: (x["exchange"], x["pair"], x["timeframe"]))
         return out
 
     # --------------------------------------------------------------- routes
@@ -315,6 +318,8 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
             "exchanges": [
                 {"id": "nobitex", "name": "Nobitex", "spot": True, "futures": False,
                  "status": "ready", "note": "market data + backtest"},
+                {"id": "azbit", "name": "AZBit", "spot": True, "futures": False,
+                 "status": "ready", "note": "public historical OHLCV + backtest"},
                 {"id": "lbank", "name": "LBank", "spot": True, "futures": False,
                  "status": "planned", "note": "coming later"},
             ]

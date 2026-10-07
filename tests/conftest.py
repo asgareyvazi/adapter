@@ -145,6 +145,68 @@ def mock_server_url():
     thread.join(timeout=5)
 
 
+@pytest.fixture(scope="module")
+def azbit_mock_server_url():
+    """Run the in-repo mock AZBit API on a local port (real HTTP)."""
+    import uvicorn
+
+    from nobitex_adapter.azbit_mockserver import app as azbit_mock_app
+
+    port = free_port()
+    config = uvicorn.Config(azbit_mock_app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        raise RuntimeError("azbit mock server did not start")
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    thread.join(timeout=5)
+
+
+def azbit_ohlc_rows(start_ts: int, n: int, interval: int = 300,
+                    base: float = 100.0) -> list[dict]:
+    """Build documented-shape /api/ohlc rows (naive UTC date strings)."""
+    from datetime import datetime, timezone
+
+    rows = []
+    for i in range(n):
+        ts = start_ts + i * interval
+        rows.append({
+            "date": datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+            "open": base,
+            "max": base * 1.01,
+            "min": base * 0.99,
+            "close": base * 1.005,
+            "volume": 5.0,
+            "volumeBase": base * 5.0,
+        })
+    return rows
+
+
+def make_azbit_client(script: list, **kwargs):
+    """Build an AzbitClient against a FakeSession with no real waiting."""
+    from unittest import mock
+
+    from nobitex_adapter.azbit_client import AzbitClient
+
+    client = AzbitClient(
+        base_url=kwargs.pop("base_url", "http://test.azbit.local"),
+        session=FakeSession(script),  # type: ignore[arg-type]
+        sleep=kwargs.pop("sleep", lambda s: None),
+        **kwargs,
+    )
+    client._limiter = mock.MagicMock()  # type: ignore[assignment]
+    return client
+
+
 SMALL_STRATEGY = '''
 from freqtrade.strategy import IStrategy
 

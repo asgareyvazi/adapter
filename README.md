@@ -35,14 +35,17 @@ duplicated.
 
 | Path | What it is |
 | --- | --- |
-| `nobitex_adapter/` | The adapter package (client, downloader, validator, ccxt exchange class, config generator, backtest runner, results parser, job manager, mock API server, **runtime binding**) |
+| `nobitex_adapter/` | The adapter package (clients, providers, downloader, validator, ccxt exchange class, config generator, backtest runner, results parser, job manager, mock API servers, **runtime binding**) |
+| `nobitex_adapter/providers/` | Exchange abstraction: `ExchangeProvider` → `NobitexProvider` / `AzbitProvider` (registry: `get_provider`) |
+| `nobitex_adapter/azbit_client.py` | AZBit public client (`/api/ohlc` cursor pagination, retry/backoff, strict parsing) + `azbit_mockserver.py` (offline test server) |
 | `nobitex_adapter/runtime.py` | Stdlib-only runtime layer: venv discovery, probe, re-exec, `doctor` diagnostic |
 | `nobitex_adapter/webui/` | FastAPI app + dependency-free static UI (dark, RTL/farsi + English) |
-| `tests/` | 232 tests: unit, integration (against the in-repo mock API), e2e (real Freqtrade + X8) |
+| `tests/` | unit, integration (against the in-repo mock APIs), e2e (real Freqtrade + X8), live (opt-in real-API) |
 | `user_data/strategies/NostalgiaForInfinityX8.py` | The real X8 strategy, **unmodified** (provenance in `STRATEGY_SOURCE.txt`) |
 | `user_data/nobitex_gui/` | Generated run configs, job state, logs, saved dashboards (git-ignored) |
-| `user_data/data/nobitex/` | Downloaded feather data (git-ignored) |
+| `user_data/data/{nobitex,azbit}/` | Downloaded feather data (git-ignored) |
 | `docs/API_MATRIX.md` | **Nobitex public API capability matrix** (audit deliverable) |
+| `docs/AZBIT.md` | **AZBit public API matrix + timestamp semantics + gap policy** |
 
 ---
 
@@ -400,7 +403,63 @@ resolution!"}` (the client surfaces that as an error, not as zero data).
 
 ---
 
-## 7. Tests
+## 7. AZBit provider (public historical OHLCV)
+
+The adapter serves a second exchange through the same pipeline — same
+downloader, validator, CLI/GUI and Freqtrade format. Full matrix:
+**[docs/AZBIT.md](docs/AZBIT.md)**.
+
+| Topic | AZBit |
+| --- | --- |
+| Public API | `https://data.azbit.com` — `GET /api/ohlc` (docs: https://data.azbit.com/docs/, https://docs.azbit.com/docs/spot/tickers/) |
+| Auth | none (public endpoints only; no keys, no private API) |
+| Symbols | generic `BASE/QUOTE` ⇄ `BASE_QUOTE` (`BTC/USDT` ⇄ `BTC_USDT`) |
+| Timeframes | `5m→minutes5`, `15m→minutes15`, `1h→hour`, `4h→hour4`, `1d→day` (+`1m→minute`, `30m→minutes30`); no `3h/6h/12h/2d/3d` |
+| Pagination | ~1000 rows/response (observed) → cursor walk (`cursor = last_ts + 1s`), boundary dedupe, stall/max-request guards |
+| Zero data | hard `ERROR` + exact empty requests + probe command (same policy as Nobitex) |
+| Gaps | reported (`quality` = `CONTIGUOUS`/`GAPPED`/`DUPLICATE`/`OUT_OF_ORDER`/`EMPTY`/`INVALID`); never filled, never hidden |
+
+> **Do not assume AZBit `minutes5` means perfectly continuous 300-second
+> Freqtrade candles. The adapter validates actual timestamps and reports
+> gaps.**
+
+Real AZBit rows are floating (`00:00:59`, `00:06:37`, …) with real gaps —
+the adapter stores them verbatim (no `floor(ts/300)*300`, ever) and the
+validator flags irregular spacing, so a gapped dataset can never look
+clean. OHLCV availability ≠ strategy compatibility: `probe` proves rows
+exist, `depth` finds the `COMMON_EARLIEST` all X8 timeframes share,
+`download` prepends warmup, `validate` + the backtest precheck refuse
+partial data.
+
+```bash
+# market discovery
+python -m nobitex_adapter --exchange azbit markets --quote USDT
+
+# read-only quality proof BEFORE downloading
+python -m nobitex_adapter --exchange azbit probe \
+  --pair BTC/USDT --timeframes "5m,15m,1h,4h,1d" \
+  --start 2024-06-01 --end 2024-06-06
+
+# historical depth + COMMON range for X8
+python -m nobitex_adapter --exchange azbit depth \
+  --pair BTC/USDT --timeframes "5m,15m,1h,4h,1d"
+
+# download + validate (writes user_data/data/azbit/…feather)
+python -m nobitex_adapter --exchange azbit download \
+  --pairs BTC/USDT --timeframes "5m,15m,1h,4h,1d" \
+  --start 2024-06-01 --end 2024-06-06
+python -m nobitex_adapter --exchange azbit validate \
+  --pairs BTC/USDT --timeframes "5m,15m,1h,4h,1d" \
+  --start 2024-06-01 --end 2024-06-06
+```
+
+PowerShell: same commands with `` ` `` continuations and quoted
+`--timeframes` (see §4). Per-command `--exchange` also works
+(`download --exchange azbit …`).
+
+---
+
+## 8. Tests
 
 ```bash
 # everything (unit + integration vs in-repo mock + full X8 e2e, ~90 s)
@@ -437,6 +496,18 @@ request count on truly-empty regions, and a **Freqtrade-compatibility
 proof** (downloaded feather loaded through Freqtrade's own data handler:
 tz-aware UTC, canonical columns, strictly monotonic, no duplicates).
 
+**AZBit tests** (`test_azbit_client.py`, `test_azbit_pagination.py`,
+`test_azbit_gaps.py`, `test_providers.py`, `test_azbit_cli.py`,
+`test_azbit_freqtrade_compat.py`, `test_azbit_live_api.py`): symbol/timeframe
+mapping, URL construction, strict parsing (null/missing/non-finite/era),
+timestamp forms (naive/`Z`/millis/offsets/unix), error envelopes,
+retry/`Retry-After`/backoff, reference+pairs/tickers discovery, the
+1000+430 pagination walk, boundary dedupe, stall/max-request termination,
+gap quality verdicts (`CONTIGUOUS`…`INVALID`), provider registry +
+legacy-client wrap, the exact `--exchange azbit` CLI commands end to end
+(markets/download/probe/depth/zero-data), Freqtrade-loader compatibility,
+and opt-in (`-m live`) real-API probes.
+
 **Runtime-binding tests** (`test_runtime.py`, `test_strategy_discovery.py`,
 `test_e2e_runtime.py`): venv discovery (POSIX + Windows layouts), runtime
 probe, `resolve_runtime` error paths, re-exec environment-identity (no
@@ -450,7 +521,7 @@ bound runtime).
 
 ---
 
-## 8. Nobitex public API audit
+## 9. Nobitex public API audit
 
 The authoritative audit of the documented public API — endpoint-by-endpoint
 capability matrix, rate limits, data-availability limits, response shapes,
@@ -472,7 +543,7 @@ Key facts (details + sources in the matrix):
 
 ---
 
-## 9. Architecture notes
+## 10. Architecture notes
 
 * **ccxt integration without forking Freqtrade**: `ccxt_nobitex.Nobitex`
   registers into ccxt's sync + async (ccxt.pro) registries; public
@@ -493,7 +564,7 @@ Key facts (details + sources in the matrix):
   ccxt class (keys via env), a `trading_mode: futures` config path already
   exists in `configgen`/symbols, and the job manager generalizes to live jobs.
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |

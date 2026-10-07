@@ -265,6 +265,7 @@ def run_backtest(
         base_timeframe=pre.base_timeframe if not skip_precheck else _base_tf(strategy_file),
         start=start,
         end=end,
+        exchange=exchange,
         user_data_dir=user_data_dir,
         datadir=datadir,
         strategies_dir=strategies_dir,

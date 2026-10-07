@@ -12,6 +12,9 @@ Rules (documented, stable, no hard-coded pair lists):
 
 Token-prefix conventions like ``1M_`` / ``100K_`` / ``1B_`` are part of the
 BASE and survive the round-trip unchanged.
+
+AZBit (``azbit_to_freqtrade`` / ``freqtrade_to_azbit``) uses a generic
+``BASE_QUOTE`` <-> ``BASE/QUOTE`` mapping (no hardcoded pairs).
 """
 from __future__ import annotations
 
@@ -78,6 +81,52 @@ def freqtrade_to_nobitex(symbol: str) -> str:
     if not base or not quote:
         raise SymbolError(f"expected BASE/QUOTE freqtrade symbol, got {symbol!r}")
     return f"{base.strip().upper()}{quote.strip().upper()}"
+
+
+def freqtrade_to_azbit(symbol: str) -> str:
+    """``BTC/USDT`` -> ``BTC_USDT`` (generic BASE/QUOTE -> BASE_QUOTE).
+
+    The mapping is fully generic (no hardcoded pairs): any ``BASE/QUOTE``
+    maps to ``BASE_QUOTE`` upper-cased. AZBit uses an underscore separator
+    (docs example: ``"BTC_USDT"``).
+    """
+    if not isinstance(symbol, str):
+        raise SymbolError(f"invalid symbol: {symbol!r}")
+    base, sep, quote = symbol.partition("/")
+    base, quote = base.strip().upper(), quote.strip().upper()
+    if not sep or not base or not quote:
+        raise SymbolError(f"expected BASE/QUOTE freqtrade symbol, got {symbol!r}")
+    if "_" in base or "_" in quote or "/" in quote:
+        raise SymbolError(f"invalid BASE/QUOTE symbol for AZBit mapping: {symbol!r}")
+    return f"{base}_{quote}"
+
+
+def azbit_to_freqtrade(symbol: str) -> str:
+    """``BTC_USDT`` -> ``BTC/USDT`` (generic BASE_QUOTE -> BASE/QUOTE).
+
+    Accepts ``BASE/QUOTE`` input unchanged (upper-cased) so mixed lists
+    normalize deterministically.
+    """
+    if not isinstance(symbol, str):
+        raise SymbolError(f"invalid symbol: {symbol!r}")
+    s = symbol.strip().upper()
+    if "/" in s:
+        base, _, quote = s.partition("/")
+        base, quote = base.strip(), quote.strip()
+        if not base or not quote:
+            raise SymbolError(f"invalid symbol: {symbol!r}")
+        return f"{base}/{quote}"
+    if "_" not in s:
+        raise SymbolError(
+            f"cannot map {symbol!r} to BASE/QUOTE "
+            f"(expected 'BASE_QUOTE' like 'BTC_USDT' or 'BASE/QUOTE')"
+        )
+    # split on the LAST underscore: base assets never contain one, and this
+    # keeps any future quote-side suffix intact
+    base, _, quote = s.rpartition("_")
+    if not base or not quote:
+        raise SymbolError(f"invalid AZBit symbol: {symbol!r}")
+    return f"{base}/{quote}"
 
 
 def quote_of(symbol: str) -> str:

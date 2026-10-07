@@ -76,14 +76,14 @@ def _parse_startup(s: Optional[str]) -> Optional[dict[str, int]]:
 
 # ---------------------------------------------------------------- markets
 def cmd_markets(args) -> int:
-    from .nobitex_client import NobitexClient
+    from .providers import get_provider
 
     _setup_logging(args.verbose)
-    client = NobitexClient()
+    provider = get_provider(args.exchange)
     try:
-        markets = client.discover_markets(quote=args.quote)
+        markets = provider.discover_markets(quote=args.quote)
     finally:
-        client.close()
+        provider.close()
     if args.json:
         print(json.dumps([m.to_dict() for m in markets], indent=1))
     else:
@@ -100,7 +100,7 @@ def cmd_markets(args) -> int:
 # --------------------------------------------------------------- download
 def cmd_download(args) -> int:
     from .downloader import DownloadRequest, Downloader
-    from .nobitex_client import NobitexClient
+    from .providers import get_provider
     from .timeframes import TimeframeError, normalize_timeframes
 
     _setup_logging(args.verbose)
@@ -108,12 +108,14 @@ def cmd_download(args) -> int:
     paths = default_user_data_layout(root)
     pairs = _parse_pairs(args.pairs)
     try:
-        tfs = normalize_timeframes(args.timeframes, param_name="--timeframes")
+        tfs = normalize_timeframes(
+            args.timeframes, param_name="--timeframes", exchange=args.exchange
+        )
     except TimeframeError as exc:
         print(f"error: {exc}")
         return 2
 
-    client = NobitexClient()
+    provider = get_provider(args.exchange)
 
     last = {"line": ""}
 
@@ -138,7 +140,7 @@ def cmd_download(args) -> int:
             for line in str(ev.get("reason", "")).splitlines():
                 print(f"  {line}")
 
-    dl = Downloader(client, paths["datadir"], paths["manifests_dir"], paths["reports_dir"], progress)
+    dl = Downloader(provider, paths["datadir"], paths["manifests_dir"], paths["reports_dir"], progress)
     try:
         summary = dl.download(
             DownloadRequest(
@@ -153,7 +155,7 @@ def cmd_download(args) -> int:
             )
         )
     finally:
-        client.close()
+        provider.close()
 
     print(f"\nTotal rows: {summary.total_rows:,}")
     for t in summary.tasks:
@@ -169,7 +171,15 @@ def cmd_ohlcv_probe(args) -> int:
     WHY a range comes back empty (history depth vs range limit vs symbol).
 
     PUBLIC endpoint only — no auth, no private data.
+
+    This is the Nobitex raw diagnostic. For AZBit (or the generic
+    quality report) use the `probe` command instead.
     """
+    if getattr(args, "exchange", "nobitex") != "nobitex":
+        print("error: ohlcv-probe is Nobitex-specific; for AZBit use:\n"
+              "  python -m nobitex_adapter --exchange azbit probe "
+              "--pair PAIR --timeframes TFS --start START --end END")
+        return 2
     from .nobitex_client import NobitexClient, NobitexNoData, NobitexError
     from .timeframes import (
         TimeframeError,
@@ -284,6 +294,217 @@ def cmd_ohlcv_probe(args) -> int:
     return 1 if any(r is None for r in executed) else 0
 
 
+# ---------------------------------------------------------------- probe
+def cmd_probe(args) -> int:
+    """Generic quality probe: fetch a range via the selected exchange and
+    report what REALLY came back (rows, first/last, duplicates, gaps,
+    spacing statistics, quality verdict per timeframe).
+
+    PUBLIC endpoints only — no auth, no private data. Unlike `download`,
+    nothing is written: this is the read-only way to prove an exchange
+    has enough valid history for a strategy BEFORE downloading.
+    """
+    from .providers import get_provider
+    from .timeframes import TimeframeError, normalize_timeframes, parse_timeframe
+
+    _setup_logging(args.verbose)
+    try:
+        tfs = normalize_timeframes(
+            args.timeframes, param_name="--timeframes", exchange=args.exchange
+        )
+    except TimeframeError as exc:
+        print(f"error: {exc}")
+        return 2
+    try:
+        start_ts = int(_parse_dt(args.start).timestamp())
+        end_ts = int(_parse_dt(args.end, default_now=True).timestamp())
+    except SystemExit as exc:
+        print(f"error: {exc}")
+        return 2
+    if end_ts <= start_ts:
+        print("error: --end must be after --start")
+        return 2
+
+    provider = get_provider(args.exchange)
+    results: list[dict] = []
+    try:
+        for tf in tfs:
+            results.append(_probe_one(provider, args.pair, tf, start_ts, end_ts))
+    finally:
+        provider.close()
+
+    if args.json:
+        print(json.dumps(
+            {"provider": args.exchange, "pair": args.pair,
+             "start": start_ts, "end": end_ts, "timeframes": results},
+            indent=1,
+        ))
+    else:
+        for r in results:
+            print()
+            print(f"provider   : {r['provider']}")
+            print(f"pair       : {r['pair']}")
+            print(f"timeframe  : {r['timeframe']} (expected interval {r['expected_interval_s']}s)")
+            print(f"range      : {r['range_start']} .. {r['range_end']}")
+            print(f"requests   : {r['request_count']}")
+            print(f"rows       : {r['returned_rows']}")
+            print(f"first      : {r['first_candle']}")
+            print(f"last       : {r['last_candle']}")
+            print(f"duplicates : {r['duplicates']}")
+            print(f"gaps       : {r['gaps']} (missing-interval events)")
+            print(f"avg gap    : {r['avg_gap_s']}s{min_max_gap(r)}")
+            print(f"quality    : {r['quality']}")
+            print(f"validation : {r['validation']}")
+            for p in r["problems"][:6]:
+                print(f"  problem: {p}")
+            if r["error"]:
+                print(f"  error: {r['error']}")
+        print()
+        bad = [r["timeframe"] for r in results if r["quality"] in ("EMPTY", "ERROR")]
+        if bad:
+            print(f"verdict: NO USABLE DATA for {', '.join(bad)} "
+                  f"(see quality lines above)")
+        else:
+            print("verdict: every timeframe returned rows (check gaps/quality "
+                  "before trusting a backtest on this range)")
+    return 1 if any(r["quality"] in ("EMPTY", "ERROR") for r in results) else 0
+
+
+def min_max_gap(r: dict) -> str:
+    if r["min_gap_s"] is None:
+        return ""
+    return f"   min {r['min_gap_s']}s / max {r['max_gap_s']}s"
+
+
+def _probe_one(provider, pair: str, tf: str, start_ts: int, end_ts: int) -> dict:
+    from .downloader import data_ts_iso
+    from .timeframes import parse_timeframe
+    from .validator import validate
+
+    import pandas as pd
+
+    interval = parse_timeframe(tf).seconds
+    base = {
+        "provider": provider.name, "pair": pair, "timeframe": tf,
+        "expected_interval_s": interval,
+        "range_start": data_ts_iso(start_ts), "range_end": data_ts_iso(end_ts),
+        "request_count": 0, "returned_rows": 0,
+        "first_candle": "-", "last_candle": "-",
+        "duplicates": 0, "gaps": 0,
+        "avg_gap_s": None, "min_gap_s": None, "max_gap_s": None,
+        "quality": "ERROR", "validation": "-", "problems": [], "error": None,
+    }
+    before = provider.request_count
+    try:
+        candles = provider.fetch_window(pair, tf, start_ts, end_ts)
+    except Exception as exc:  # noqa: BLE001 - probe reports, never tracebacks
+        base["request_count"] = provider.request_count - before
+        base["error"] = f"{exc.__class__.__name__}: {exc}"
+        base["problems"] = [base["error"]]
+        return base
+    base["request_count"] = provider.request_count - before
+    base["returned_rows"] = len(candles)
+    if not candles:
+        base["quality"] = "EMPTY"
+        base["problems"] = ["exchange returned zero rows for the requested range"]
+        return base
+    arrival = [int(c.ts) for c in candles]
+    base["first_candle"] = data_ts_iso(arrival[0])
+    base["last_candle"] = data_ts_iso(arrival[-1])
+    base["duplicates"] = len(arrival) - len(set(arrival))
+    # gap statistics over the de-duplicated, sorted series
+    uniq = sorted(set(arrival))
+    diffs = [b - a for a, b in zip(uniq, uniq[1:])]
+    if diffs:
+        base["avg_gap_s"] = round(sum(diffs) / len(diffs), 1)
+        base["min_gap_s"] = min(diffs)
+        base["max_gap_s"] = max(diffs)
+        base["gaps"] = sum(1 for d in diffs if d > interval)
+    df = pd.DataFrame(
+        [(c.ts, c.open, c.high, c.low, c.close, c.volume) for c in candles],
+        columns=["date", "open", "high", "low", "close", "volume"],
+    )
+    _, rep = validate(
+        df, pair, tf, expected_start_ts=start_ts, expected_end_ts=end_ts,
+        end_is_open=True,
+    )
+    base["validation"] = rep.status
+    base["quality"] = rep.quality
+    base["problems"] = list(rep.problems)
+    return base
+
+
+# ---------------------------------------------------------------- depth
+def cmd_depth(args) -> int:
+    """Historical-depth discovery: earliest/latest available candle per
+    timeframe (verified by real probes) plus the COMMON range all
+    timeframes share — the range a multi-timeframe strategy can use.
+
+    PUBLIC endpoints only. Nothing is downloaded.
+    """
+    from .providers import get_provider
+    from .timeframes import TimeframeError, normalize_timeframes
+
+    _setup_logging(args.verbose)
+    try:
+        tfs = normalize_timeframes(
+            args.timeframes, param_name="--timeframes", exchange=args.exchange
+        )
+    except TimeframeError as exc:
+        print(f"error: {exc}")
+        return 2
+
+    provider = get_provider(args.exchange)
+    try:
+        infos = [provider.discover_depth(args.pair, tf) for tf in tfs]
+    finally:
+        provider.close()
+
+    from .downloader import data_ts_iso
+
+    rows = []
+    for info in infos:
+        rows.append({
+            "timeframe": info.timeframe,
+            "earliest": data_ts_iso(info.earliest_ts) if info.earliest_ts else "-",
+            "latest": data_ts_iso(info.latest_ts) if info.latest_ts else "-",
+            "requests": info.requests_made,
+            "notes": info.notes,
+        })
+    earliest_all = [i.earliest_ts for i in infos if i.earliest_ts]
+    latest_all = [i.latest_ts for i in infos if i.latest_ts]
+    common_earliest = max(earliest_all) if earliest_all else None
+    common_latest = min(latest_all) if latest_all else None
+
+    if args.json:
+        print(json.dumps(
+            {"provider": args.exchange, "pair": args.pair, "depth": rows,
+             "common_earliest_ts": common_earliest,
+             "common_latest_ts": common_latest},
+            indent=1,
+        ))
+    else:
+        print(f"provider: {args.exchange}   pair: {args.pair}")
+        print(f"{'TF':<6} {'EARLIEST':<28} {'LATEST':<28} {'REQ':>4}")
+        for r in rows:
+            print(f"{r['timeframe']:<6} {r['earliest']:<28} {r['latest']:<28} {r['requests']:>4}")
+        for r, info in zip(rows, infos):
+            for n in info.notes:
+                print(f"  [{r['timeframe']}] {n}")
+        print()
+        if common_earliest:
+            print(f"COMMON_EARLIEST = {data_ts_iso(common_earliest)} "
+                  f"(= max over timeframes; download --start at/after this)")
+        else:
+            print("COMMON_EARLIEST = - (no timeframe returned any history)")
+        if common_latest:
+            print(f"COMMON_LATEST   = {data_ts_iso(common_latest)}")
+        missing = [r["timeframe"] for r in rows if r["earliest"] == "-"]
+        if missing:
+            print(f"note: no history at all for {', '.join(missing)}")
+    return 0
+
+
 # ---------------------------------------------------------------- validate
 def cmd_validate(args) -> int:
     from .downloader import Downloader
@@ -294,7 +515,9 @@ def cmd_validate(args) -> int:
     paths = default_user_data_layout(root)
     pairs = _parse_pairs(args.pairs)
     try:
-        tfs = normalize_timeframes(args.timeframes, param_name="--timeframes")
+        tfs = normalize_timeframes(
+            args.timeframes, param_name="--timeframes", exchange=args.exchange
+        )
     except TimeframeError as exc:
         print(f"error: {exc}")
         return 2
@@ -351,6 +574,7 @@ def cmd_backtest(args) -> int:
             pairs=pairs,
             start=_parse_dt(args.start),
             end=_parse_dt(args.end, default_now=True),
+            exchange=args.exchange,
             user_data_dir=paths["user_data_dir"],
             datadir=paths["datadir"],
             strategies_dir=paths["strategies_dir"],
@@ -419,9 +643,14 @@ def cmd_mock(args) -> int:
     _setup_logging(args.verbose)
     import uvicorn
 
-    from .mockserver import app as mock_app
+    if args.exchange == "azbit":
+        from .azbit_mockserver import app as mock_app
 
-    print(f"Mock Nobitex public API  ->  http://{args.host}:{args.port}")
+        print(f"Mock AZBit public API  ->  http://{args.host}:{args.port}")
+    else:
+        from .mockserver import app as mock_app
+
+        print(f"Mock Nobitex public API  ->  http://{args.host}:{args.port}")
     uvicorn.run(mock_app, host=args.host, port=args.port, log_level="warning")
     return 0
 
@@ -435,12 +664,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Freqtrade repository root containing .venv + user_data "
              "(default: auto = the adapter checkout)",
     )
+    p.add_argument(
+        "--exchange", default="nobitex", choices=["nobitex", "azbit"],
+        help="exchange provider for market data (default nobitex); "
+             "a per-command --exchange overrides this",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     sub = p.add_subparsers(dest="command", required=True)
 
-    pm = sub.add_parser("markets", help="discover Nobitex markets")
+    pm = sub.add_parser("markets", help="discover markets on the selected exchange")
     pm.add_argument("--quote", default="USDT", help="filter by quote asset (default USDT)")
     pm.add_argument("--json", action="store_true")
+    pm.add_argument("--exchange", default=argparse.SUPPRESS,
+                    choices=["nobitex", "azbit"])
     pm.set_defaults(func=cmd_markets)
 
     pdl = sub.add_parser("download", help="download historical OHLCV")
@@ -448,7 +684,8 @@ def build_parser() -> argparse.ArgumentParser:
     pdl.add_argument("--timeframes", required=True, help="comma list, e.g. 5m,15m,1h,4h,1d")
     pdl.add_argument("--start", required=True)
     pdl.add_argument("--end", default="now")
-    pdl.add_argument("--exchange", default="nobitex")
+    pdl.add_argument("--exchange", default=argparse.SUPPRESS,
+                     choices=["nobitex", "azbit"])
     pdl.add_argument("--force", action="store_true", help="ignore resume manifest")
     pdl.add_argument("--keep-incomplete", action="store_true",
                      help="keep the still-open last candle")
@@ -467,12 +704,41 @@ def build_parser() -> argparse.ArgumentParser:
                     help="how much of each raw JSON response to print")
     pp.set_defaults(func=cmd_ohlcv_probe)
 
+    pg = sub.add_parser(
+        "probe",
+        help="quality probe: fetch a range via the selected exchange and "
+             "report rows/first/last/duplicates/gaps/quality (read-only)",
+    )
+    pg.add_argument("--pair", required=True, help="e.g. BTC/USDT")
+    pg.add_argument("--timeframes", required=True,
+                    help="comma list, e.g. \"5m,15m,1h,4h,1d\"")
+    pg.add_argument("--start", required=True)
+    pg.add_argument("--end", default="now")
+    pg.add_argument("--json", action="store_true")
+    pg.add_argument("--exchange", default=argparse.SUPPRESS,
+                    choices=["nobitex", "azbit"])
+    pg.set_defaults(func=cmd_probe)
+
+    pdp = sub.add_parser(
+        "depth",
+        help="historical-depth discovery: earliest/latest candle per "
+             "timeframe + the COMMON range all share (read-only)",
+    )
+    pdp.add_argument("--pair", required=True, help="e.g. BTC/USDT")
+    pdp.add_argument("--timeframes", required=True,
+                     help="comma list, e.g. \"5m,15m,1h,4h,1d\"")
+    pdp.add_argument("--json", action="store_true")
+    pdp.add_argument("--exchange", default=argparse.SUPPRESS,
+                     choices=["nobitex", "azbit"])
+    pdp.set_defaults(func=cmd_depth)
+
     pv = sub.add_parser("validate", help="validate stored data")
     pv.add_argument("--pairs", required=True)
     pv.add_argument("--timeframes", required=True)
     pv.add_argument("--start", required=True)
     pv.add_argument("--end", default="now")
-    pv.add_argument("--exchange", default="nobitex")
+    pv.add_argument("--exchange", default=argparse.SUPPRESS,
+                    choices=["nobitex", "azbit"])
     pv.add_argument("--closed-range", action="store_true",
                     help="end is a closed period (last candle complete)")
     pv.set_defaults(func=cmd_validate)
@@ -482,6 +748,8 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--pairs", required=True)
     pb.add_argument("--start", required=True)
     pb.add_argument("--end", default="now")
+    pb.add_argument("--exchange", default=argparse.SUPPRESS,
+                    choices=["nobitex", "azbit"])
     pb.add_argument("--stake-currency", default="USDT")
     pb.add_argument("--capital", type=float, default=10_000.0)
     pb.add_argument("--stake", default="unlimited")
@@ -496,9 +764,11 @@ def build_parser() -> argparse.ArgumentParser:
     pu.add_argument("--port", type=int, default=8765)
     pu.set_defaults(func=cmd_ui)
 
-    pmk = sub.add_parser("mock", help="start the mock Nobitex API (offline testing)")
+    pmk = sub.add_parser("mock", help="start a mock exchange API (offline testing)")
     pmk.add_argument("--host", default="127.0.0.1")
     pmk.add_argument("--port", type=int, default=8900)
+    pmk.add_argument("--exchange", default=argparse.SUPPRESS,
+                     choices=["nobitex", "azbit"])
     pmk.set_defaults(func=cmd_mock)
 
     pd_ = sub.add_parser("doctor", help="print the runtime diagnostic for --repo")

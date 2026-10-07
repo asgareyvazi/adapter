@@ -24,16 +24,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _tfs(value: Any) -> list[str]:
+def _tfs(value: Any, exchange: str = "nobitex") -> list[str]:
     """Normalize a timeframes param via the canonical boundary.
 
     Delegates to ``timeframes.normalize_timeframes`` — the same boundary
     the CLI uses, so the GUI cannot char-split a string ('1d' -> ['1','d'])
     and invalid values fail with a clear, actionable error.
+    Exchange-aware (AZBit supports a subset of the Nobitex set).
     """
     from .timeframes import normalize_timeframes
 
-    return normalize_timeframes(value, param_name="timeframes")
+    return normalize_timeframes(value, param_name="timeframes", exchange=exchange)
 
 
 @dataclass
@@ -173,16 +174,18 @@ def _progress_to_job(job: Job, ev: dict) -> None:
 
 def make_download_job(paths: dict, job: Job) -> None:
     from .downloader import DownloadRequest, Downloader
-    from .nobitex_client import NobitexClient
+    from .providers import get_provider, normalize_exchange
     from .cli import _parse_dt, _parse_pairs
 
     p = job.params
-    tfs = _tfs(p["timeframes"])
-    client = NobitexClient()
-    job.add_log(f"[info] Downloading {len(_parse_pairs(p['pairs']))} pairs x {len(tfs)} timeframes")
+    exchange = normalize_exchange(p.get("exchange", "nobitex"))
+    tfs = _tfs(p["timeframes"], exchange=exchange)
+    provider = get_provider(exchange)
+    job.add_log(f"[info] Downloading {len(_parse_pairs(p['pairs']))} pairs x {len(tfs)} timeframes "
+                f"from {exchange}")
     try:
         summary = Downloader(
-            client, paths["datadir"], paths["manifests_dir"], paths["reports_dir"],
+            provider, paths["datadir"], paths["manifests_dir"], paths["reports_dir"],
             progress_cb=lambda ev: _progress_to_job(job, ev),
             stop_event=job.stop_event,
         ).download(DownloadRequest(
@@ -190,12 +193,12 @@ def make_download_job(paths: dict, job: Job) -> None:
             timeframes=tfs,
             start=_parse_dt(p["start"]),
             end=_parse_dt(p.get("end", "now"), default_now=True),
-            exchange="nobitex",
+            exchange=exchange,
             drop_incomplete_last=bool(p.get("drop_incomplete", True)),
             force=bool(p.get("force", False)),
         ))
     finally:
-        client.close()
+        provider.close()
     job.result = summary.to_dict()
     job.progress = {"stage": "complete", "total_rows": summary.total_rows}
     if not summary.ok:
@@ -204,14 +207,17 @@ def make_download_job(paths: dict, job: Job) -> None:
 
 def make_validate_job(paths: dict, job: Job) -> None:
     from .downloader import Downloader
+    from .providers import normalize_exchange
     from .cli import _parse_dt, _parse_pairs
 
     p = job.params
-    tfs = _tfs(p["timeframes"])
-    job.add_log(f"[info] Validating {len(_parse_pairs(p['pairs']))} pairs x {len(tfs)} timeframes")
+    exchange = normalize_exchange(p.get("exchange", "nobitex"))
+    tfs = _tfs(p["timeframes"], exchange=exchange)
+    job.add_log(f"[info] Validating {len(_parse_pairs(p['pairs']))} pairs x {len(tfs)} timeframes "
+                f"({exchange})")
     dl = Downloader(None, paths["datadir"], paths["manifests_dir"], paths["reports_dir"])  # type: ignore[arg-type]
     reports = dl.validate_dataset(
-        exchange="nobitex",
+        exchange=exchange,
         pairs=_parse_pairs(p["pairs"]),
         timeframes=tfs,
         start=_parse_dt(p["start"]),
@@ -232,14 +238,15 @@ MARKETS_CACHE_ENV = "NOBITEX_ADAPTER_MARKETS_CACHE"
 def make_discover_job(job: Job) -> None:
     import os
 
-    from .nobitex_client import NobitexClient
+    from .providers import get_provider, normalize_exchange
 
-    job.add_log(f"[info] Discovering Nobitex markets (quote={job.params.get('quote', 'USDT')})")
-    client = NobitexClient()
+    exchange = normalize_exchange(job.params.get("exchange", "nobitex"))
+    job.add_log(f"[info] Discovering {exchange} markets (quote={job.params.get('quote', 'USDT')})")
+    provider = get_provider(exchange)
     try:
-        markets = client.discover_markets(quote=job.params.get("quote", "USDT"))
+        markets = provider.discover_markets(quote=job.params.get("quote", "USDT"))
     finally:
-        client.close()
+        provider.close()
     job.add_log(f"[info] {len(markets)} markets found "
                 f"({sum(1 for m in markets if m.active)} active)")
     result = {"markets": [m.to_dict() for m in markets], "fetched_at": _now_iso()}
@@ -274,9 +281,12 @@ def make_backtest_job(paths: dict, job: Job) -> None:
     parts = {str(root), pkg_root}
     env["PYTHONPATH"] = os.pathsep.join(list(parts) + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
 
+    from .providers import normalize_exchange
+
     argv = [
         sys.executable, "-m", "nobitex_adapter",
         "--repo", str(root),
+        "--exchange", normalize_exchange(p.get("exchange", "nobitex")),
         "backtest",
         "--strategy", p["strategy"],
         "--pairs", ",".join(pairs),
