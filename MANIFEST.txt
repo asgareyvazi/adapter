@@ -1,4 +1,4 @@
-MANIFEST — 2026-10-10T10:18:57Z — HEAD 635e5104a0bebecec2a99fa188eee9ac676c5457
+MANIFEST — 2026-10-10T10:19:47Z — branch-tip 959c118a01d47ccf762833af09ec9037aa9bf304 (prior local HEAD at test time: 635e5104a0bebecec2a99fa188eee9ac676c5457)
 X8: f202e860ee5937a9a426ad01501d6afeedc6e4a24525cb490815994d85d21cd0  user_data/strategies/NostalgiaForInfinityX8.py
 ---- tree (excluding .git) ----
 ./.github/workflows/ci.yml
