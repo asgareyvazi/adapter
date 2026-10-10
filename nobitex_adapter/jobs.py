@@ -281,6 +281,7 @@ def make_backtest_job(paths: dict, job: Job) -> None:
     parts = {str(root), pkg_root}
     env["PYTHONPATH"] = os.pathsep.join(list(parts) + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
 
+    from .configgen import DEFAULT_SPOT_FEE
     from .providers import normalize_exchange
 
     argv = [
@@ -296,7 +297,7 @@ def make_backtest_job(paths: dict, job: Job) -> None:
         "--stake", str(p.get("stake", "unlimited")),
         "--stake-currency", str(p.get("stake_currency", "USDT")),
         "--max-open", str(p.get("max_open_trades", 8)),
-        "--fee", str(p.get("fee", "0.002") or ""),
+        "--fee", str(p.get("fee", DEFAULT_SPOT_FEE) or ""),
         "--out", str(out_json),
     ]
     job.add_log(f"[info] freqtrade backtest: {p['strategy']} "

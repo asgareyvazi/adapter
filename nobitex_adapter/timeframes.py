@@ -54,6 +54,33 @@ AZBIT_INTERVALS: dict[str, str] = {
 # Reverse map: azbit interval -> timeframe
 _INTERVAL_TO_TF = {v: k for k, v in AZBIT_INTERVALS.items()}
 
+# Wallex `resolution` values for GET /v1/udf/history. The official reference
+# (https://api-docs.wallex.ir/ -> candles section) documents the parameter but
+# gives only ONE example value: ``resolution=60`` (minutes). Wallex UDF is a
+# format sibling of Nobitex UDF (identical t/o/h/l/c/v columnar response), so
+# the minute/hour/day ladder below mirrors the Nobitex ladder — but every
+# entry is a PROVISIONAL mapping until confirmed by a live probe (see
+# tests/test_wallex_live_api.py::test_live_wallex_resolutions). A rejected
+# resolution surfaces as WallexAPIError with the exact request, never as
+# silently substituted data.
+WALLEX_RESOLUTIONS: dict[str, str] = {
+    "1m": "1",
+    "5m": "5",
+    "15m": "15",
+    "30m": "30",
+    "1h": "60",
+    "3h": "180",
+    "4h": "240",
+    "6h": "360",
+    "12h": "720",
+    "1d": "D",
+    "2d": "2D",
+    "3d": "3D",
+}
+
+# Reverse map: wallex resolution -> timeframe
+_WALLEX_RESOLUTION_TO_TF = {v: k for k, v in WALLEX_RESOLUTIONS.items()}
+
 _TF_RE = re.compile(r"^(\d+)([mhdw])$")
 
 # Timeframes the adapter supports end-to-end (download + validation + backtest).
@@ -61,6 +88,9 @@ SUPPORTED_TIMEFRAMES = tuple(NOBITEX_RESOLUTIONS.keys())
 
 # Timeframes AZBit can serve (subset — AZBit has no 3h/6h/12h/2d/3d).
 AZBIT_SUPPORTED_TIMEFRAMES = tuple(AZBIT_INTERVALS.keys())
+
+# Timeframes Wallex can serve (provisional ladder — see WALLEX_RESOLUTIONS).
+WALLEX_SUPPORTED_TIMEFRAMES = tuple(WALLEX_RESOLUTIONS.keys())
 
 # Timeframes required by NostalgiaForInfinityX8 (base + informative per pair)
 X8_BASE_TIMEFRAME = "5m"
@@ -160,9 +190,10 @@ def normalize_timeframes(
       received value so the problem is visible at a glance
 
     ``exchange`` selects the support set: ``"azbit"`` validates against
-    the AZBit interval map, anything else (``None``/``"nobitex"``)
-    against the Nobitex resolution map. The default preserves the exact
-    historical Nobitex behavior.
+    the AZBit interval map, ``"wallex"`` against the Wallex resolution
+    map, anything else (``None``/``"nobitex"``) against the Nobitex
+    resolution map. The default preserves the exact historical Nobitex
+    behavior.
     """
     # -- collect candidate items without ever iterating a str for characters
     items: list[str] = []
@@ -216,6 +247,10 @@ def normalize_timeframes(
         supported_map: dict[str, str] = AZBIT_INTERVALS
         supported_names = AZBIT_SUPPORTED_TIMEFRAMES
         exchange_label = "AZBit"
+    elif (exchange or "nobitex").lower() == "wallex":
+        supported_map = WALLEX_RESOLUTIONS
+        supported_names = WALLEX_SUPPORTED_TIMEFRAMES
+        exchange_label = "Wallex"
     else:
         supported_map = NOBITEX_RESOLUTIONS
         supported_names = SUPPORTED_TIMEFRAMES
@@ -246,6 +281,29 @@ def from_nobitex_resolution(resolution: str) -> str:
         raise TimeframeError(
             f"unknown Nobitex resolution {resolution!r} "
             f"(known: {', '.join(sorted(_RESOLUTION_TO_TF))})"
+        ) from exc
+
+
+def to_wallex_resolution(tf: str) -> str:
+    """Convert a freqtrade timeframe to the Wallex `resolution` string."""
+    t = parse_timeframe(tf)
+    try:
+        return WALLEX_RESOLUTIONS[t.tf]
+    except KeyError as exc:
+        raise TimeframeError(
+            f"timeframe {t.tf!r} has no Wallex resolution "
+            f"(supported: {', '.join(WALLEX_SUPPORTED_TIMEFRAMES)})"
+        ) from exc
+
+
+def from_wallex_resolution(resolution: str) -> str:
+    """Convert a Wallex `resolution` to a freqtrade timeframe."""
+    try:
+        return _WALLEX_RESOLUTION_TO_TF[resolution]
+    except KeyError as exc:
+        raise TimeframeError(
+            f"unknown Wallex resolution {resolution!r} "
+            f"(known: {', '.join(sorted(_WALLEX_RESOLUTION_TO_TF))})"
         ) from exc
 
 

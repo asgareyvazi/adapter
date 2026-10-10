@@ -101,8 +101,12 @@ def test_exchanges_spot_only(gui):
     assert azbit["status"] == "ready"
     assert azbit["spot"] is True
     assert azbit["futures"] is False
+    wallex = next(e for e in ex if e["id"] == "wallex")
+    assert wallex["status"] == "ready"
+    assert wallex["spot"] is True
+    assert wallex["futures"] is False
     for e in ex:
-        if e["id"] not in ("nobitex", "azbit"):
+        if e["id"] not in ("nobitex", "azbit", "wallex"):
             assert e["status"] == "planned"  # others disabled in the UI
 
 

@@ -28,12 +28,14 @@ import ccxt
 from ccxt.base.decimal_to_precision import DECIMAL_PLACES
 from ccxt.base.errors import NotSupported
 
+from .configgen import DEFAULT_SPOT_FEE
 from .nobitex_client import DEFAULT_BASE_URL, NobitexClient, NobitexError, parse_candles_payload
 from .timeframes import to_nobitex_resolution
 
-# Documented default Nobitex spot fee (maker = taker), overridable via the
-# generated backtest config's ``tradingFee``. See docs/nobitex-api.md.
-DEFAULT_SPOT_FEE = 0.002
+# Nobitex's documented spot fee (maker = taker) equals the adapter-wide
+# assumed spot fee (configgen.DEFAULT_SPOT_FEE, imported above so the
+# literal exists exactly once); overridable via the generated backtest
+# config's ``tradingFee``. See docs/nobitex-api.md.
 
 
 class Nobitex(ccxt.Exchange):  # type: ignore[no-redef]

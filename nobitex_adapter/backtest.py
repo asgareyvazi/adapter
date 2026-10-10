@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .compare import register_run
 from .configgen import (
+    DEFAULT_SPOT_FEE,
     btc_informative_pair,
     build_backtest_config,
     detect_strategy_timeframes,
@@ -200,7 +202,7 @@ def run_backtest(
     initial_capital: float = 10_000.0,
     stake_amount: object = "unlimited",
     max_open_trades: int = 8,
-    fee: Optional[float] = 0.002,
+    fee: Optional[float] = DEFAULT_SPOT_FEE,
     blacklist: Optional[list[str]] = None,
     advanced: Optional[dict] = None,
     exchange: str = "nobitex",
@@ -212,7 +214,11 @@ def run_backtest(
 
     Result descriptor keys:
         ok, strategy, config_path, results_zip, exit_code, elapsed, error,
-        log (list[str] tail)
+        run_id, runtime
+
+    Every EXECUTED run (success or failure) is registered in the run
+    registry (``<results_dir>/runs/<run_id>.run.json``) for later
+    comparison; registration never fails the backtest itself.
     """
     t0 = time.time()
     if progress_cb is None:
@@ -285,6 +291,38 @@ def run_backtest(
     exportdir.mkdir(parents=True, exist_ok=True)
     config["exportdirectory"] = str(exportdir)
 
+    # Run-registry spec: everything that identifies this execution.
+    spec = {
+        "strategy": strategy,
+        "exchange": exchange,
+        "pairs": list(pairs),
+        "timeframes": (
+            list(pre.required_timeframes)
+            if not skip_precheck else [_base_tf(strategy_file)]
+        ),
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "stake_currency": stake_currency,
+        "initial_capital": float(initial_capital),
+        "stake_amount": stake_amount,
+        "max_open_trades": int(max_open_trades),
+        "fee": float(fee) if fee is not None else None,
+    }
+
+    def _reg(status: str, results_zip=None, error=None):
+        try:
+            rec = register_run(
+                results_dir, spec=spec, status=status, config=config,
+                config_path=config_path, results_zip=results_zip,
+                strategy_file=strategy_file, datadir=datadir,
+                runtime=runtime, elapsed=round(elapsed, 1), error=error,
+            )
+            emit(event="run_registered", run_id=rec["run_id"], status=status)
+            return rec["run_id"]
+        except Exception as exc:  # noqa: BLE001 - registration never fails backtests
+            log.warning("run registration failed (result unaffected): %s", exc)
+            return None
+
     argv = [
         "backtesting",
         "--config", str(config_path),
@@ -300,25 +338,29 @@ def run_backtest(
 
     runtime = process_runtime()
     if exit_code != 0:
+        error = f"freqtrade exited with code {exit_code}"
         return {
             "ok": False, "strategy": strategy, "config_path": str(config_path),
             "results_zip": None, "exit_code": exit_code, "elapsed": round(elapsed, 1),
-            "error": f"freqtrade exited with code {exit_code}", "runtime": runtime,
+            "error": error, "runtime": runtime,
+            "run_id": _reg("failed", error=error),
         }
 
     zip_path = latest_results_zip(exportdir)
     if zip_path is None:
+        error = "freqtrade finished but no results zip was found"
         return {
             "ok": False, "strategy": strategy, "config_path": str(config_path),
             "results_zip": None, "exit_code": exit_code, "elapsed": round(elapsed, 1),
-            "error": "freqtrade finished but no results zip was found",
-            "runtime": runtime,
+            "error": error, "runtime": runtime,
+            "run_id": _reg("failed", error=error),
         }
 
     return {
         "ok": True, "strategy": strategy, "config_path": str(config_path),
         "results_zip": str(zip_path), "exit_code": 0, "elapsed": round(elapsed, 1),
         "error": None, "runtime": runtime,
+        "run_id": _reg("ok", results_zip=zip_path),
     }
 
 

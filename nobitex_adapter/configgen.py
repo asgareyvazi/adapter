@@ -31,6 +31,13 @@ DEFAULT_BLACKLIST_PATTERNS: list[str] = [
     r"WETH/.*",
 ]
 
+# Assumed spot taker fee used when the user does not pass --fee (single
+# literal for the whole adapter: CLI default, GUI default, run_backtest and
+# the generated config all reference THIS). Nobitex and Wallex both publish
+# 0.002 maker=taker on spot; AZBit publishes no schedule, so for AZBit this
+# is an assumption — override with --fee when the real schedule is known.
+DEFAULT_SPOT_FEE = 0.002
+
 
 def timerange_str(start: datetime, end: datetime) -> str:
     """Freqtrade timerange: 'YYYYMMDD' or 'YYYYMMDD-HHMM' (UTC)."""
@@ -111,7 +118,7 @@ def build_backtest_config(
     initial_capital: float = 10_000.0,
     stake_amount: object = "unlimited",
     max_open_trades: int = 8,
-    fee: Optional[float] = 0.002,
+    fee: Optional[float] = DEFAULT_SPOT_FEE,
     blacklist: Optional[list[str]] = None,
     advanced: Optional[dict] = None,
 ) -> dict:

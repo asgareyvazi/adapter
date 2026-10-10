@@ -36,16 +36,21 @@ duplicated.
 | Path | What it is |
 | --- | --- |
 | `nobitex_adapter/` | The adapter package (clients, providers, downloader, validator, ccxt exchange class, config generator, backtest runner, results parser, job manager, mock API servers, **runtime binding**) |
-| `nobitex_adapter/providers/` | Exchange abstraction: `ExchangeProvider` → `NobitexProvider` / `AzbitProvider` (registry: `get_provider`) |
+| `nobitex_adapter/providers/` | Exchange abstraction: `ExchangeProvider` → `NobitexProvider` / `AzbitProvider` / `WallexProvider` (registry: `get_provider`; ids in `exchanges.py`) |
 | `nobitex_adapter/azbit_client.py` | AZBit public client (`/api/ohlc` cursor pagination, retry/backoff, strict parsing) + `azbit_mockserver.py` (offline test server) |
+| `nobitex_adapter/wallex_client.py` | Wallex public client (`/v1/udf/history` cursor walk, strict UDF parsing) + `wallex_mockserver.py` (offline test server) |
+| `nobitex_adapter/compare.py` | Run registry + cross-run comparison (metric table + incompatibility warnings, schema v1) |
+| `nobitex_adapter/datacontract.py` | Versioned data contract: sidecar schema + deterministic dataset fingerprints |
+| `nobitex_adapter/ratelimit.py` | Shared per-endpoint rate limiter for the three HTTP clients |
 | `nobitex_adapter/runtime.py` | Stdlib-only runtime layer: venv discovery, probe, re-exec, `doctor` diagnostic |
 | `nobitex_adapter/webui/` | FastAPI app + dependency-free static UI (dark, RTL/farsi + English) |
 | `tests/` | unit, integration (against the in-repo mock APIs), e2e (real Freqtrade + X8), live (opt-in real-API) |
 | `user_data/strategies/NostalgiaForInfinityX8.py` | The real X8 strategy, **unmodified** (provenance in `STRATEGY_SOURCE.txt`) |
 | `user_data/nobitex_gui/` | Generated run configs, job state, logs, saved dashboards (git-ignored) |
-| `user_data/data/{nobitex,azbit}/` | Downloaded feather data (git-ignored) |
+| `user_data/data/{nobitex,azbit,wallex}/` | Downloaded feather data (git-ignored) |
 | `docs/API_MATRIX.md` | **Nobitex public API capability matrix** (audit deliverable) |
 | `docs/AZBIT.md` | **AZBit public API matrix + timestamp semantics + gap policy** |
+| `docs/WALLEX.md` | **Wallex public API matrix + provisional resolution ladder + pagination** |
 
 ---
 
@@ -271,6 +276,13 @@ python -m nobitex_adapter --repo /path/to/freqtrade backtest \
 # what runtime would this command use? (host + selected, versions + paths)
 python -m nobitex_adapter --repo /path/to/freqtrade doctor
 
+# compare registered backtest runs (metric table + incompatibility warnings)
+python -m nobitex_adapter --repo /path/to/freqtrade compare --list
+python -m nobitex_adapter --repo /path/to/freqtrade compare --runs <id1>,<id2>
+
+# adapter version
+python -m nobitex_adapter --version
+
 # raw public OHLCV diagnostic: print the EXACT request URL + raw JSON for a
 # pair/timeframe/range, then auto-probe (requested range, narrow window,
 # recent range, countback) and diagnose WHY a range can come back empty.
@@ -291,7 +303,14 @@ option, before the subcommand), `doctor` (runtime diagnostic), `ohlcv-probe`
 (raw public OHLCV request/response diagnostic); `download --force` (ignore
 resume manifest), `--startup 5m:850,1d:260` (per-tf lead-in overrides),
 `--keep-incomplete`; `backtest --out results.json` (machine-readable result
-descriptor incl. `runtime`), `--skip-precheck`.
+descriptor incl. `runtime`), `--skip-precheck`; `compare --list` /
+`compare --runs id1,id2` (cross-run comparison, `--json` for machines).
+
+After `pip install`, every subcommand is also an installed script:
+`nobitex-markets`, `nobitex-download`, `nobitex-validate`,
+`nobitex-backtest`, `nobitex-ui`, `nobitex-mock`, `nobitex-probe`,
+`nobitex-depth`, `nobitex-doctor`, `nobitex-compare` (global `--repo` /
+`--exchange` / `-v` may follow the script name; `--version` works on all).
 
 ### `--timeframes` is normalized at one boundary (shell-safe)
 
@@ -459,7 +478,50 @@ PowerShell: same commands with `` ` `` continuations and quoted
 
 ---
 
-## 8. Tests
+## 8. Wallex provider (public historical OHLCV)
+
+The third exchange on the same pipeline — same downloader, validator,
+CLI/GUI and Freqtrade format. Full matrix:
+**[docs/WALLEX.md](docs/WALLEX.md)**.
+
+| Topic | Wallex |
+| --- | --- |
+| Public API | `https://api.wallex.ir` — `GET /v1/markets`, `GET /v1/udf/history` (docs: https://api-docs.wallex.ir/) |
+| Auth | none (public endpoints only; no keys, no private API) |
+| Symbols | concatenated like Nobitex (`BTC/USDT` ⇄ `BTCUSDT`) plus the Toman quote (`BTC/TMN` ⇄ `BTCTMN`) |
+| Timeframes | `5m→5`, `1h→60` (docs example), `4h→240`, `1d→D`, full `1m…3d` ladder — **provisional** (docs show only `60`); verified live, see docs |
+| Pagination | no `page` param, no documented row cap → cursor walk (`from = last_ts + 1`), boundary dedupe, stall/max-request guards |
+| Zero data | hard `ERROR` + exact empty requests + probe command (same policy as Nobitex/AZBit) |
+| Gaps | reported, never filled, never hidden (same validator) |
+
+```bash
+# market discovery (USDT + TMN quotes)
+python -m nobitex_adapter --exchange wallex markets --quote USDT
+
+# read-only quality proof BEFORE downloading
+python -m nobitex_adapter --exchange wallex probe \
+  --pair BTC/USDT --timeframes "5m,15m,1h,4h,1d" \
+  --start 2024-06-01 --end 2024-06-06
+
+# historical depth + COMMON range for X8
+python -m nobitex_adapter --exchange wallex depth \
+  --pair BTC/USDT --timeframes "5m,15m,1h,4h,1d"
+
+# download + validate (writes user_data/data/wallex/…feather)
+python -m nobitex_adapter --exchange wallex download \
+  --pairs BTC/USDT --timeframes "5m,15m,1h,4h,1d" \
+  --start 2024-06-01 --end 2024-06-06
+python -m nobitex_adapter --exchange wallex validate \
+  --pairs BTC/USDT --timeframes "5m,15m,1h,4h,1d" \
+  --start 2024-06-01 --end 2024-06-06
+```
+
+PowerShell: same commands with `` ` `` continuations and quoted
+`--timeframes` (see §4). Per-command `--exchange` also works.
+
+---
+
+## 9. Tests
 
 ```bash
 # everything (unit + integration vs in-repo mock + full X8 e2e, ~90 s)
@@ -508,6 +570,37 @@ legacy-client wrap, the exact `--exchange azbit` CLI commands end to end
 (markets/download/probe/depth/zero-data), Freqtrade-loader compatibility,
 and opt-in (`-m live`) real-API probes.
 
+**Wallex tests** (`test_wallex_client.py`, `test_wallex_pagination.py`,
+`test_wallex_cli.py`, `test_providers.py`, `test_wallex_live_api.py`):
+`TMN`-quote symbol mapping, the provisional resolution ladder (+ roundtrip),
+strict UDF parsing (docs-example shape, `no_data`, column mismatch),
+request shape, retry/`Retry-After`/backoff, `success:false` envelopes,
+market discovery incl. `TMN` filter, the cursor walk (multi-page, boundary
+dedupe, stall/max-request termination, stop-event), the exact
+`--exchange wallex` CLI commands end to end
+(markets/download/probe/depth/zero-data), and opt-in (`-m live`) real-API
+probes that verify the provisional ladder.
+
+**Packaging/runtime-repair tests** (`test_console_scripts.py`,
+`test_runtime.py`): every installed `nobitex-*` entry point resolves to a
+zero-argument callable and routes to its subcommand (global-option hoisting,
+`--help`/`--version` behavior, argparse exit codes), plus the
+store-alias-safe interpreter usability check.
+
+**Data-contract, registry & comparison tests** (`test_datacontract.py`,
+`test_compare.py`): fingerprint determinism (known-answer vector, layout /
+dtype invariance, mutation sensitivity), v1 manifest/report stamping,
+legacy-manifest resume + upgrade, content-addressed run IDs, config-hash
+canonicalization, the full incompatibility-warning matrix, and the
+`compare` CLI + `/api/runs` GUI endpoints.
+
+```bash
+# opt-in live probes (real public APIs, network required)
+python -m pytest tests/test_live_api.py -m live -q          # Nobitex
+python -m pytest tests/test_azbit_live_api.py -m live -q    # AZBit
+python -m pytest tests/test_wallex_live_api.py -m live -q   # Wallex
+```
+
 **Runtime-binding tests** (`test_runtime.py`, `test_strategy_discovery.py`,
 `test_e2e_runtime.py`): venv discovery (POSIX + Windows layouts), runtime
 probe, `resolve_runtime` error paths, re-exec environment-identity (no
@@ -521,7 +614,7 @@ bound runtime).
 
 ---
 
-## 9. Nobitex public API audit
+## 10. Nobitex public API audit
 
 The authoritative audit of the documented public API — endpoint-by-endpoint
 capability matrix, rate limits, data-availability limits, response shapes,
@@ -543,7 +636,7 @@ Key facts (details + sources in the matrix):
 
 ---
 
-## 10. Architecture notes
+## 11. Architecture notes
 
 * **ccxt integration without forking Freqtrade**: `ccxt_nobitex.Nobitex`
   registers into ccxt's sync + async (ccxt.pro) registries; public
@@ -560,11 +653,26 @@ Key facts (details + sources in the matrix):
   results zip (stats JSON + wallet feather) into a stable dashboard payload;
   per-pair **buy-&-hold** is computed from the downloaded base-timeframe data
   (the zip's `market_change.feather` is an aggregate, not per-pair).
+* **Run registry + comparison**: every executed backtest registers a
+  content-addressed run record (`results/runs/<run_id>.run.json`, schema v1:
+  spec, config hash, strategy source hash, input-data fingerprints, summary,
+  runtime versions). `compare` (CLI) and `/api/runs/compare` (GUI) build a
+  side-by-side metric table plus explicit incompatibility warnings
+  (`RANGE_DIFF`, `DATA_FP_DIFF`, `FEE_DIFF`, …) wherever runs are not
+  directly comparable.
+* **Data contract v1**: every manifest and validation report carries
+  `contract`/`provenance`/`fingerprint` (deterministic content hash over
+  sorted UTC-second candles + float64 OHLCV). Legacy unversioned manifests
+  resume unchanged and upgrade on save.
+* **One assumed spot fee**: `configgen.DEFAULT_SPOT_FEE` (`0.002`) is the
+  single literal behind the CLI/GUI/`run_backtest`/config default and the
+  ccxt market parser (Nobitex and Wallex publish 0.002 maker=taker; AZBit
+  publishes no schedule — override with `--fee`).
 * **Future-ready (out of scope now)**: private API would plug into the same
   ccxt class (keys via env), a `trading_mode: futures` config path already
   exists in `configgen`/symbols, and the job manager generalizes to live jobs.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Cause / fix |
 | --- | --- |

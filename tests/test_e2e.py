@@ -94,6 +94,17 @@ def test_full_pipeline_with_real_x8(e2e_repo):
     zip_path = Path(res["results_zip"])
     assert zip_path.is_file()
 
+    # the executed run registered itself for later comparison
+    from nobitex_adapter.compare import load_run
+
+    assert res["run_id"], res
+    rec = load_run(repo / "user_data" / "nobitex_gui" / "results", res["run_id"])
+    assert rec["schema"] == 1 and rec["status"] == "ok"
+    assert rec["spec"]["strategy"] == "NostalgiaForInfinityX8"
+    assert rec["spec"]["exchange"] == "nobitex"
+    assert rec["summary"]["trades_count"] >= 1
+    assert rec["data_fingerprints"]["BTC/USDT 5m"]["rows"] > 0
+
     dash = parse_backtest_zip(zip_path, datadir=repo / "user_data" / "data")
     assert dash["strategy"] == "NostalgiaForInfinityX8"
     assert dash["pairlist"] == PAIRS

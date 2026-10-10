@@ -320,6 +320,8 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
                  "status": "ready", "note": "market data + backtest"},
                 {"id": "azbit", "name": "AZBit", "spot": True, "futures": False,
                  "status": "ready", "note": "public historical OHLCV + backtest"},
+                {"id": "wallex", "name": "Wallex", "spot": True, "futures": False,
+                 "status": "ready", "note": "public historical OHLCV + backtest"},
                 {"id": "lbank", "name": "LBank", "spot": True, "futures": False,
                  "status": "planned", "note": "coming later"},
             ]
@@ -418,6 +420,24 @@ def create_app(root: Optional[Path] = None) -> FastAPI:
         if not p.is_file() or not p.name.endswith(".dashboard.json"):
             raise HTTPException(404, "no such result")
         return json.loads(p.read_text(encoding="utf-8"))
+
+    @app.get("/api/runs")
+    def runs_list():
+        from ..compare import list_runs
+
+        return {"runs": list_runs(_paths()["results_dir"])}
+
+    @app.get("/api/runs/compare")
+    def runs_compare(ids: str = ""):
+        from ..compare import compare_runs
+
+        run_ids = [r.strip() for r in ids.split(",") if r.strip()]
+        if not run_ids:
+            raise HTTPException(400, "give ?ids=id1,id2,...")
+        try:
+            return compare_runs(_paths()["results_dir"], run_ids)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
 
     # -------------------------------------------------------------- static
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

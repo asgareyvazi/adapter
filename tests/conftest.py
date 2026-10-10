@@ -207,6 +207,92 @@ def make_azbit_client(script: list, **kwargs):
     return client
 
 
+def wallex_history_payload(n: int, start_ts: int, interval: int = 300,
+                           price: float = 100.0) -> dict:
+    """Build a documented-shape /v1/udf/history 'ok' payload (number-strings)."""
+    t = [start_ts + i * interval for i in range(n)]
+    return {
+        "s": "ok",
+        "t": t,
+        "o": [f"{price:.10f}"] * n,
+        "h": [f"{price * 1.01:.10f}"] * n,
+        "l": [f"{price * 0.99:.10f}"] * n,
+        "c": [f"{price * 1.005:.10f}"] * n,
+        "v": ["10.0000000000"] * n,
+    }
+
+
+def wallex_markets_payload(*symbols: str) -> dict:
+    """Build a documented-shape /v1/markets payload for the given symbols."""
+    out: dict[str, dict] = {}
+    for sym in symbols:
+        s = sym.upper()
+        quote = "USDT" if s.endswith("USDT") else ("TMN" if s.endswith("TMN") else "")
+        base = s[: -len(quote)] if quote else s
+        out[s] = {
+            "symbol": s,
+            "baseAsset": base,
+            "baseAssetPrecision": 8,
+            "quoteAsset": quote,
+            "quotePrecision": 8,
+            "faName": f"{base} - {quote}",
+            "stats": {
+                "bidPrice": "99.9900000000",
+                "askPrice": "100.0100000000",
+                "24h_ch": 1.5,
+                "24h_volume": "12.5000000000",
+                "24h_quoteVolume": "1250.0000000000",
+                "24h_highPrice": "101.0000000000",
+                "24h_lowPrice": "99.0000000000",
+                "lastPrice": "100.0000000000",
+            },
+            "createdAt": "2020-04-01T00:00:00.000000Z",
+        }
+    return {"success": True, "message": "ok", "result": {"symbols": out}}
+
+
+def make_wallex_client(script: list, **kwargs):
+    """Build a WallexClient against a FakeSession with no real waiting."""
+    from unittest import mock
+
+    from nobitex_adapter.wallex_client import WallexClient
+
+    client = WallexClient(
+        base_url=kwargs.pop("base_url", "http://test.wallex.local"),
+        session=FakeSession(script),  # type: ignore[arg-type]
+        sleep=kwargs.pop("sleep", lambda s: None),
+        **kwargs,
+    )
+    client._limiter = mock.MagicMock()  # type: ignore[assignment]
+    return client
+
+
+@pytest.fixture(scope="module")
+def wallex_mock_server_url():
+    """Run the in-repo mock Wallex API on a local port (real HTTP)."""
+    import uvicorn
+
+    from nobitex_adapter.wallex_mockserver import app as wallex_mock_app
+
+    port = free_port()
+    config = uvicorn.Config(wallex_mock_app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                break
+        except OSError:
+            time.sleep(0.05)
+    else:
+        raise RuntimeError("wallex mock server did not start")
+    yield f"http://127.0.0.1:{port}"
+    server.should_exit = True
+    thread.join(timeout=5)
+
+
 SMALL_STRATEGY = '''
 from freqtrade.strategy import IStrategy
 

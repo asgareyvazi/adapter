@@ -7,7 +7,8 @@ minimal generalization below instead of a parallel architecture:
 
   ExchangeProvider (base.py — the contract)
       ├── NobitexProvider (nobitex.py — wraps the existing NobitexClient)
-      └── AzbitProvider   (azbit.py   — wraps the new AzbitClient)
+      ├── AzbitProvider   (azbit.py   — wraps the new AzbitClient)
+      └── WallexProvider  (wallex.py  — wraps the new WallexClient)
 
 The downloader, CLI, jobs and GUI talk to ``ExchangeProvider`` only.
 Provider-specific syntax (``BTCUSDT`` vs ``BTC_USDT``, ``5`` vs
@@ -25,6 +26,7 @@ from .base import (
     normalize_exchange,
 )
 from .nobitex import NobitexProvider
+from .wallex import WallexProvider
 
 __all__ = [
     "SUPPORTED_EXCHANGES",
@@ -33,6 +35,7 @@ __all__ = [
     "ExchangeProvider",
     "NobitexProvider",
     "ProviderError",
+    "WallexProvider",
     "get_provider",
     "normalize_exchange",
 ]
@@ -47,4 +50,6 @@ def get_provider(name: str | None = None, **kwargs) -> ExchangeProvider:
     exch = normalize_exchange(name)
     if exch == "azbit":
         return AzbitProvider(**kwargs)
+    if exch == "wallex":
+        return WallexProvider(**kwargs)
     return NobitexProvider(**kwargs)

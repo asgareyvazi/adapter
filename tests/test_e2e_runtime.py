@@ -69,12 +69,19 @@ def bare_python() -> str:
     executable path — a venv's python is a symlink to the base interpreter,
     so path comparison is meaningless for environment identity).
     """
+    from nobitex_adapter import runtime as rt
+
     seen = set()
     for c in ("/usr/bin/python3", shutil.which("python3") or "",
               shutil.which("python") or ""):
         if not c or c in seen:
             continue
         seen.add(c)
+        # Usability first: a path that exists but cannot run code (notably
+        # invalid Windows Store aliases, which fail closed here) must never
+        # be mistaken for a working Freqtrade-less launcher.
+        if not rt.is_usable_python(c):
+            continue
         try:
             r = subprocess.run([c, "-c", "import freqtrade"],
                                capture_output=True, timeout=120)

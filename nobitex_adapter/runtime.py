@@ -90,6 +90,26 @@ def find_venv_python(repo: Path) -> Optional[Path]:
     return None
 
 
+def is_usable_python(exe: object, timeout: float = 60.0) -> bool:
+    """True when `exe` actually runs Python code (exit 0 + expected output).
+
+    Pure path checks (`is_file`, `shutil.which`) are NOT sufficient: on
+    Windows they accept invalid Microsoft Store stubs (`WindowsApps/
+    python3.exe`), and anywhere they accept broken symlinks or stale
+    copies. This executes `print('ok')` and requires both a zero exit code
+    and the exact output, so Store aliases and broken interpreters fail
+    closed. Stdlib-only; never raises.
+    """
+    try:
+        proc = subprocess.run(
+            [str(exe), "-c", "print('ok')"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and (proc.stdout or "").strip() == "ok"
+
+
 _PROBE_CODE = r"""
 import json, sys
 out = {

@@ -1,0 +1,53 @@
+TEST REPORT — nobitex-adapter (Wallex completion workspace)
+Date (UTC): 2026-10-10T10:18:41Z
+HEAD: 635e5104a0bebecec2a99fa188eee9ac676c5457
+Branch: arena/dc3ed543-adapter
+Python: Python 3.11.2
+Stack: Name: freqtrade Version: 2026.9 Name: ccxt Version: 4.5.85 Name: pandas Version: 3.0.6 Name: pytest Version: 9.1.1
+Command: PYTHONPATH=/home/user/adapter /home/user/ftenv/bin/python -m pytest tests/ -q -p no:cacheprovider
+Exit: 0
+================================================================
+........................................................................ [ 15%]
+........................................................................ [ 30%]
+........................................................................ [ 46%]
+........................................................................ [ 61%]
+........................................................................ [ 76%]
+........................................................................ [ 92%]
+.....................................                                    [100%]
+=============================== warnings summary ===============================
+../ftenv/lib/python3.11/site-packages/fastapi/testclient.py:1
+  /home/user/ftenv/lib/python3.11/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+  /tmp/pytest-of-user/pytest-0/e2e0/repo/user_data/strategies/NostalgiaForInfinityX8.py:4527: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.
+    btc_informative_4h = pd.concat([btc_informative_4h, new_cols], axis=1, copy=False)
+
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+  /tmp/pytest-of-user/pytest-0/e2e0/repo/user_data/strategies/NostalgiaForInfinityX8.py:3934: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.
+    informative_15m = pd.concat([informative_15m, new_cols], axis=1, copy=False)
+
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+  /tmp/pytest-of-user/pytest-0/e2e0/repo/user_data/strategies/NostalgiaForInfinityX8.py:3759: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.
+    informative_1h = pd.concat([informative_1h, new_cols], axis=1, copy=False)
+
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+  /tmp/pytest-of-user/pytest-0/e2e0/repo/user_data/strategies/NostalgiaForInfinityX8.py:3556: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.
+    informative_4h = pd.concat([informative_4h, new_cols], axis=1, copy=False)
+
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+  /tmp/pytest-of-user/pytest-0/e2e0/repo/user_data/strategies/NostalgiaForInfinityX8.py:3340: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.
+    informative_1d = pd.concat([informative_1d, new_cols], axis=1, copy=False)
+
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+tests/test_e2e.py::test_full_pipeline_with_real_x8
+  /tmp/pytest-of-user/pytest-0/e2e0/repo/user_data/strategies/NostalgiaForInfinityX8.py:4353: Pandas4Warning: The copy keyword is deprecated and will be removed in a future version. Copy-on-Write is active in pandas since 3.0 which utilizes a lazy copy mechanism that defers copies until necessary. Use .copy() to make an eager copy if necessary.
+    df = pd.concat([df, new_cols], axis=1, copy=False)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+469 passed, 14 deselected, 13 warnings in 135.77s (0:02:15)

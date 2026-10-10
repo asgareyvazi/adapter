@@ -1,0 +1,48 @@
+# Minimal CI: install + console-script smoke + compile + non-live tests + CLI smokes.
+#
+# Linux only (ubuntu-latest, CPython 3.11). The suite contains no Windows
+# runners and makes no Windows claims: POSIX-specific tests are marked and
+# documented as such in the test files themselves.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project + test deps
+        run: pip install -e .[test]
+
+      - name: Compile check
+        run: python -m compileall -q nobitex_adapter tests
+
+      - name: Console-script smoke (installed entry points)
+        run: |
+          for s in markets download validate backtest ui mock probe depth doctor compare; do
+            nobitex-$s --help >/dev/null || { echo "nobitex-$s --help failed"; exit 1; }
+          done
+          test "$(nobitex-doctor --version)" = "nobitex 0.1.0"
+          nobitex-download >/dev/null 2>&1; test $? -eq 2  # argparse wiring
+
+      - name: Non-live test suite
+        run: python -m pytest -q
+
+      - name: CLI smokes (hermetic, no network)
+        run: |
+          python -m nobitex_adapter --help >/dev/null
+          python -m nobitex_adapter markets --help >/dev/null
+          python -m nobitex_adapter download --help >/dev/null
+          python -m nobitex_adapter compare --help >/dev/null
+          python -m nobitex_adapter --repo /tmp/ci-empty compare --list

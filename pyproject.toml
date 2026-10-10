@@ -28,13 +28,23 @@ dependencies = [
     "numpy",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "httpx",  # FastAPI TestClient transport used by the GUI tests
+]
+
 [project.scripts]
-nobitex-markets = "nobitex_adapter.cli:cmd_markets"
-nobitex-download = "nobitex_adapter.cli:cmd_download"
-nobitex-validate = "nobitex_adapter.cli:cmd_validate"
-nobitex-backtest = "nobitex_adapter.cli:cmd_backtest"
-nobitex-ui = "nobitex_adapter.cli:cmd_ui"
-nobitex-mock = "nobitex_adapter.cli:cmd_mock"
+nobitex-markets = "nobitex_adapter.cli:markets_main"
+nobitex-download = "nobitex_adapter.cli:download_main"
+nobitex-validate = "nobitex_adapter.cli:validate_main"
+nobitex-backtest = "nobitex_adapter.cli:backtest_main"
+nobitex-ui = "nobitex_adapter.cli:ui_main"
+nobitex-mock = "nobitex_adapter.cli:mock_main"
+nobitex-probe = "nobitex_adapter.cli:probe_main"
+nobitex-depth = "nobitex_adapter.cli:depth_main"
+nobitex-doctor = "nobitex_adapter.cli:doctor_main"
+nobitex-compare = "nobitex_adapter.cli:compare_main"
 
 [tool.setuptools.packages.find]
 include = ["nobitex_adapter*"]
@@ -45,7 +55,8 @@ testpaths = ["tests"]
 # are opt-in via `pytest -m live`
 addopts = "-m 'not live'"
 markers = [
-    "integration: tests that run real HTTP against the in-repo mock Nobitex API (no external network)",
+    "unit: fast hermetic tests (scripted HTTP only, no servers, no freqtrade)",
+    "integration: tests that run real HTTP against the in-repo mock exchange APIs (no external network)",
     "e2e: full-pipeline tests incl. real Freqtrade backtests (slow)",
-    "live: tests that hit the real Nobitex public API (network required, run with -m live)",
+    "live: tests that hit a real exchange public API (network required, run with -m live)",
 ]

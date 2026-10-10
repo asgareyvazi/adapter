@@ -14,6 +14,9 @@ rows/response) into Freqtrade-compatible feather files, with:
   * deterministic output (feather, UTC, freqtrade column layout)
   * resume: chunk coverage is recorded in a manifest so unchanged ranges
     are skipped (no blind re-download)
+  * data-contract v1 sidecars (see datacontract.py): every manifest and
+    report carries ``contract``/``provenance``/``fingerprint``; legacy
+    unversioned manifests resume unchanged and upgrade on save
 
 The engine talks to ``providers.ExchangeProvider`` only — no
 provider-specific syntax (``BTCUSDT`` vs ``BTC_USDT``, ``5`` vs
@@ -34,6 +37,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
+from .datacontract import contract_block, fingerprint_dataframe
 from .nobitex_client import NobitexError
 from .timeframes import DEFAULT_STARTUP_CANDLES, parse_timeframe
 from .validator import ValidationReport, validate
@@ -478,7 +482,7 @@ class Downloader:
             )
             self._emit(event="task_empty", pair=pair, timeframe=tf,
                        reason=task.error)
-            self._save_report(req, pair, tf, None, task)
+            self._save_report(req, pair, tf, None, task, fingerprint=None)
             return task
 
         # dedupe + sort (deterministic)
@@ -503,7 +507,12 @@ class Downloader:
         for col in ("open", "high", "low", "close", "volume"):
             combined[col] = combined[col].astype("float64")
 
+        # data-contract v1: fingerprint the exact stored content, then stamp
+        # the manifest (upgrading legacy v0 sidecars) and the report.
+        fingerprint = fingerprint_dataframe(combined)
         self._write_feather(path, combined)
+        manifest.update(contract_block(req.exchange, pair, tf, fingerprint))
+        self._save_manifest(manifest_path, manifest)
         task.rows = int(len(combined))
         task.new_rows = max(0, len(combined) - len(existing_ts))
         task.status = "DONE"
@@ -516,7 +525,7 @@ class Downloader:
         task.validation = rep
         if not rep.ok:
             task.status = "DONE"  # data stored; validation flags problems
-        self._save_report(req, pair, tf, rep, task)
+        self._save_report(req, pair, tf, rep, task, fingerprint=fingerprint)
         self._emit(event="task_done", pair=pair, timeframe=tf, rows=task.rows,
                    new_rows=task.new_rows, status=task.status,
                    validation=rep.status)
@@ -562,7 +571,7 @@ class Downloader:
                 )
         return rep
 
-    def _save_report(self, req, pair, tf, rep, task) -> None:
+    def _save_report(self, req, pair, tf, rep, task, fingerprint=None) -> None:
         self.report_dir.mkdir(parents=True, exist_ok=True)
         name = f"{pair_to_filename(pair)}-{tf}"
         payload = {
@@ -576,6 +585,7 @@ class Downloader:
             "last_ts": task.last_ts,
             "error": task.error,
         }
+        payload.update(contract_block(req.exchange, pair, tf, fingerprint))
         (self.report_dir / f"{name}.json").write_text(json.dumps(payload, indent=1), encoding="utf-8")
 
     # ------------------------------------------------------------- validate cmd

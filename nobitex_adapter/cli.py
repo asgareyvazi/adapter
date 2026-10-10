@@ -22,7 +22,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .configgen import DEFAULT_BLACKLIST_PATTERNS, default_repo_root, default_user_data_layout
+from . import __version__
+from .configgen import (
+    DEFAULT_BLACKLIST_PATTERNS,
+    DEFAULT_SPOT_FEE,
+    default_repo_root,
+    default_user_data_layout,
+)
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -172,12 +178,12 @@ def cmd_ohlcv_probe(args) -> int:
 
     PUBLIC endpoint only — no auth, no private data.
 
-    This is the Nobitex raw diagnostic. For AZBit (or the generic
-    quality report) use the `probe` command instead.
+    This is the Nobitex raw diagnostic. For other exchanges (or the
+    generic quality report) use the `probe` command instead.
     """
     if getattr(args, "exchange", "nobitex") != "nobitex":
-        print("error: ohlcv-probe is Nobitex-specific; for AZBit use:\n"
-              "  python -m nobitex_adapter --exchange azbit probe "
+        print("error: ohlcv-probe is Nobitex-specific; for other exchanges use:\n"
+              "  python -m nobitex_adapter --exchange EXCHANGE probe "
               "--pair PAIR --timeframes TFS --start START --end END")
         return 2
     from .nobitex_client import NobitexClient, NobitexNoData, NobitexError
@@ -599,7 +605,77 @@ def cmd_backtest(args) -> int:
         print(f"[error] {res.get('error')}", file=sys.stderr)
         return 1
     print(f"[done] results: {res['results_zip']}")
+    if res.get("run_id"):
+        print(f"[run] {res['run_id']}")
     return 0
+
+
+# ---------------------------------------------------------------- compare
+def cmd_compare(args) -> int:
+    """List registered backtest runs or compare a set of them."""
+    _setup_logging(args.verbose)
+    from .compare import compare_runs, list_runs
+
+    root = Path(args.repo) if args.repo else default_repo_root()
+    results_dir = default_user_data_layout(root)["results_dir"]
+
+    if args.list:
+        runs = list_runs(results_dir)
+        if args.json:
+            print(json.dumps(runs, indent=1, default=str))
+            return 0
+        if not runs:
+            print("no registered runs "
+                  f"(results dir: {results_dir}; run `backtest` to register one)")
+            return 0
+        print(f"{len(runs)} registered run(s):")
+        for r in runs:
+            spec = r.get("spec", {})
+            print(f"  {r['run_id']}  [{r.get('status')}] "
+                  f"{spec.get('strategy')} / {spec.get('exchange')} / "
+                  f"{','.join(spec.get('pairs') or [])} / "
+                  f"{','.join(spec.get('timeframes') or [])} / "
+                  f"{spec.get('start')}..{spec.get('end')}")
+        return 0
+
+    run_ids = [r.strip() for r in (args.runs or "").split(",") if r.strip()]
+    if not run_ids:
+        print("error: give --runs id1,id2... or --list", file=sys.stderr)
+        return 2
+    try:
+        cmp = compare_runs(results_dir, run_ids)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(cmp, indent=1, default=str))
+        return 0
+    _print_comparison(cmp)
+    return 0
+
+
+def _print_comparison(cmp: dict) -> None:
+    rows = cmp.get("runs", [])
+    header = ("run_id", "status", "strategy", "exchange", "trades", "return%",
+              "maxDD%", "win%", "PF", "sharpe", "BH%")
+    print(" | ".join(header))
+    for r in rows:
+        def _n(v):
+            return "-" if v is None else (f"{v:.2f}" if isinstance(v, float) else str(v))
+
+        print(" | ".join([
+            str(r.get("run_id")), str(r.get("status")), str(r.get("strategy")),
+            str(r.get("exchange")), _n(r.get("trades")), _n(r.get("return_pct")),
+            _n(r.get("max_drawdown_pct")), _n(r.get("win_rate_pct")),
+            _n(r.get("profit_factor")), _n(r.get("sharpe")), _n(r.get("buy_hold_pct")),
+        ]))
+    warns = cmp.get("warnings", [])
+    if warns:
+        print("\nwarnings:")
+        for w in warns:
+            print(f"  [{w['severity']}] {w['code']}: {w['message']}")
+    else:
+        print("\nno incompatibility warnings: runs are directly comparable")
 
 
 # ---------------------------------------------------------------- doctor
@@ -647,6 +723,10 @@ def cmd_mock(args) -> int:
         from .azbit_mockserver import app as mock_app
 
         print(f"Mock AZBit public API  ->  http://{args.host}:{args.port}")
+    elif args.exchange == "wallex":
+        from .wallex_mockserver import app as mock_app
+
+        print(f"Mock Wallex public API  ->  http://{args.host}:{args.port}")
     else:
         from .mockserver import app as mock_app
 
@@ -657,6 +737,11 @@ def cmd_mock(args) -> int:
 
 # ---------------------------------------------------------------- main
 def build_parser() -> argparse.ArgumentParser:
+    # stdlib-only import: build_parser must work on a bare interpreter
+    # (doctor/re-exec without third-party packages installed).
+    from .exchanges import SUPPORTED_EXCHANGES
+
+    EXCHANGE_CHOICES = sorted(SUPPORTED_EXCHANGES)
     p = argparse.ArgumentParser(prog="nobitex", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
@@ -664,8 +749,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Freqtrade repository root containing .venv + user_data "
              "(default: auto = the adapter checkout)",
     )
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument(
-        "--exchange", default="nobitex", choices=["nobitex", "azbit"],
+        "--exchange", default="nobitex", choices=EXCHANGE_CHOICES,
         help="exchange provider for market data (default nobitex); "
              "a per-command --exchange overrides this",
     )
@@ -676,7 +762,7 @@ def build_parser() -> argparse.ArgumentParser:
     pm.add_argument("--quote", default="USDT", help="filter by quote asset (default USDT)")
     pm.add_argument("--json", action="store_true")
     pm.add_argument("--exchange", default=argparse.SUPPRESS,
-                    choices=["nobitex", "azbit"])
+                    choices=EXCHANGE_CHOICES)
     pm.set_defaults(func=cmd_markets)
 
     pdl = sub.add_parser("download", help="download historical OHLCV")
@@ -685,7 +771,7 @@ def build_parser() -> argparse.ArgumentParser:
     pdl.add_argument("--start", required=True)
     pdl.add_argument("--end", default="now")
     pdl.add_argument("--exchange", default=argparse.SUPPRESS,
-                     choices=["nobitex", "azbit"])
+                     choices=EXCHANGE_CHOICES)
     pdl.add_argument("--force", action="store_true", help="ignore resume manifest")
     pdl.add_argument("--keep-incomplete", action="store_true",
                      help="keep the still-open last candle")
@@ -716,7 +802,7 @@ def build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--end", default="now")
     pg.add_argument("--json", action="store_true")
     pg.add_argument("--exchange", default=argparse.SUPPRESS,
-                    choices=["nobitex", "azbit"])
+                    choices=EXCHANGE_CHOICES)
     pg.set_defaults(func=cmd_probe)
 
     pdp = sub.add_parser(
@@ -729,7 +815,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="comma list, e.g. \"5m,15m,1h,4h,1d\"")
     pdp.add_argument("--json", action="store_true")
     pdp.add_argument("--exchange", default=argparse.SUPPRESS,
-                     choices=["nobitex", "azbit"])
+                     choices=EXCHANGE_CHOICES)
     pdp.set_defaults(func=cmd_depth)
 
     pv = sub.add_parser("validate", help="validate stored data")
@@ -738,7 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
     pv.add_argument("--start", required=True)
     pv.add_argument("--end", default="now")
     pv.add_argument("--exchange", default=argparse.SUPPRESS,
-                    choices=["nobitex", "azbit"])
+                    choices=EXCHANGE_CHOICES)
     pv.add_argument("--closed-range", action="store_true",
                     help="end is a closed period (last candle complete)")
     pv.set_defaults(func=cmd_validate)
@@ -749,12 +835,13 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--start", required=True)
     pb.add_argument("--end", default="now")
     pb.add_argument("--exchange", default=argparse.SUPPRESS,
-                    choices=["nobitex", "azbit"])
+                    choices=EXCHANGE_CHOICES)
     pb.add_argument("--stake-currency", default="USDT")
     pb.add_argument("--capital", type=float, default=10_000.0)
     pb.add_argument("--stake", default="unlimited")
     pb.add_argument("--max-open", type=int, default=8)
-    pb.add_argument("--fee", default="0.002", help="'0.002' or '' for exchange default")
+    pb.add_argument("--fee", default=str(DEFAULT_SPOT_FEE),
+                    help=f"'{DEFAULT_SPOT_FEE}' or '' for exchange default")
     pb.add_argument("--skip-precheck", action="store_true")
     pb.add_argument("--out", default=None, help="write result descriptor JSON here")
     pb.set_defaults(func=cmd_backtest)
@@ -768,11 +855,17 @@ def build_parser() -> argparse.ArgumentParser:
     pmk.add_argument("--host", default="127.0.0.1")
     pmk.add_argument("--port", type=int, default=8900)
     pmk.add_argument("--exchange", default=argparse.SUPPRESS,
-                     choices=["nobitex", "azbit"])
+                     choices=EXCHANGE_CHOICES)
     pmk.set_defaults(func=cmd_mock)
 
     pd_ = sub.add_parser("doctor", help="print the runtime diagnostic for --repo")
     pd_.set_defaults(func=cmd_doctor)
+
+    pc = sub.add_parser("compare", help="list registered backtest runs or compare a set")
+    pc.add_argument("--runs", default=None, help="comma-separated run IDs to compare")
+    pc.add_argument("--list", action="store_true", help="list registered runs")
+    pc.add_argument("--json", action="store_true")
+    pc.set_defaults(func=cmd_compare)
 
     return p
 
@@ -799,6 +892,111 @@ def main(argv: Optional[list[str]] = None) -> int:
             sys.exit(rc)
 
     return args.func(args)
+
+
+# ---------------------------------------------------------------------------
+# Installed console-script entry points (pyproject [project.scripts]).
+#
+# Each `nobitex-<command>` script calls its `<command>_main()` with NO
+# arguments, so these wrappers translate `sys.argv` into the equivalent
+# `main([...])` call. Global options (--repo/--exchange/-v) may appear
+# anywhere on the script command line; they are hoisted before the
+# subcommand so argparse accepts them exactly as `python -m` does.
+# (Earlier declarations pointed at cmd_* directly, which raised TypeError
+# because cmd_* require an `args` namespace.)
+# ---------------------------------------------------------------------------
+
+_GLOBAL_VALUE_OPTS = ("--repo", "--exchange")
+_GLOBAL_FLAG_OPTS = ("-v", "--verbose", "--version")
+
+
+def _split_script_argv(argv: list[str]) -> tuple[list[str], list[str]]:
+    """Split script argv into (global_opts, command_opts).
+
+    Deterministic, platform-independent, no argparse involved: only known
+    global spellings (`--opt value`, `--opt=value`, flags) move; `-h/--help`
+    and everything else (including unknown `--flags` and anything after a
+    bare `--`) stays in place so subcommand parsing/errors are unchanged.
+    """
+    glob: list[str] = []
+    rest: list[str] = []
+    i = 0
+    n = len(argv)
+    while i < n:
+        tok = argv[i]
+        if tok == "--":
+            rest.extend(argv[i:])
+            break
+        moved = False
+        for opt in _GLOBAL_VALUE_OPTS:
+            if tok == opt:
+                if i + 1 < n:
+                    glob.extend([tok, argv[i + 1]])
+                    i += 2
+                else:
+                    rest.append(tok)  # missing value: leave for argparse to reject
+                    i += 1
+                moved = True
+                break
+            if tok.startswith(opt + "="):
+                glob.append(tok)
+                i += 1
+                moved = True
+                break
+        if moved:
+            continue
+        if tok in _GLOBAL_FLAG_OPTS:
+            glob.append(tok)
+            i += 1
+            continue
+        rest.append(tok)
+        i += 1
+    return glob, rest
+
+
+def _script_main(command: str, argv: Optional[list[str]] = None) -> int:
+    glob, rest = _split_script_argv(list(sys.argv[1:] if argv is None else argv))
+    return main(glob + [command] + rest)
+
+
+def markets_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("markets", argv)
+
+
+def download_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("download", argv)
+
+
+def validate_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("validate", argv)
+
+
+def backtest_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("backtest", argv)
+
+
+def ui_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("ui", argv)
+
+
+def mock_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("mock", argv)
+
+
+def probe_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("probe", argv)
+
+
+def depth_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("depth", argv)
+
+
+def doctor_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("doctor", argv)
+
+
+def compare_main(argv: Optional[list[str]] = None) -> int:
+    return _script_main("compare", argv)
 
 
 if __name__ == "__main__":

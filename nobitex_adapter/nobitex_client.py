@@ -27,6 +27,7 @@ from typing import Callable, Optional
 
 import requests
 
+from .ratelimit import RateLimiter as _RateLimiter  # noqa: F401 (compat alias)
 from .symbols import Market, nobitex_to_freqtrade
 from .timeframes import TimeframeError, to_nobitex_resolution
 
@@ -161,28 +162,6 @@ def parse_candles_payload(payload: dict, ctx: str = "") -> list[Candle]:
             )
         )
     return out
-
-
-class _RateLimiter:
-    """Tiny per-endpoint token-bucket limiter (thread-safe)."""
-
-    def __init__(self, rps: dict[str, float]) -> None:
-        self._rps = dict(rps)
-        self._lock = threading.Lock()
-        self._last: dict[str, float] = {}
-
-    def wait(self, endpoint: str) -> None:
-        rps = self._rps.get(endpoint, 5.0)
-        if rps <= 0:
-            return
-        interval = 1.0 / rps
-        with self._lock:
-            now = time.monotonic()
-            last = self._last.get(endpoint, 0.0)
-            sleep_for = last + interval - now
-            self._last[endpoint] = max(now, last) + interval
-        if sleep_for > 0:
-            time.sleep(sleep_for)
 
 
 class NobitexClient:

@@ -57,6 +57,7 @@ from typing import Callable, Optional
 
 import requests
 
+from .ratelimit import RateLimiter as _RateLimiter  # noqa: F401 (compat alias)
 from .symbols import Market, azbit_to_freqtrade
 
 DEFAULT_BASE_URL = "https://data.azbit.com"
@@ -276,28 +277,6 @@ def parse_ohlc_payload(payload: object, ctx: str = "") -> list[Candle]:
 def _dt_to_azbit(ts: int) -> str:
     """Unix seconds -> AZBit ``start``/``end`` format (UTC, no offset)."""
     return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
-
-
-class _RateLimiter:
-    """Tiny per-endpoint token-bucket limiter (thread-safe)."""
-
-    def __init__(self, rps: dict[str, float]) -> None:
-        self._rps = dict(rps)
-        self._lock = threading.Lock()
-        self._last: dict[str, float] = {}
-
-    def wait(self, endpoint: str) -> None:
-        rps = self._rps.get(endpoint, 5.0)
-        if rps <= 0:
-            return
-        interval = 1.0 / rps
-        with self._lock:
-            now = time.monotonic()
-            last = self._last.get(endpoint, 0.0)
-            sleep_for = last + interval - now
-            self._last[endpoint] = max(now, last) + interval
-        if sleep_for > 0:
-            time.sleep(sleep_for)
 
 
 class AzbitClient:

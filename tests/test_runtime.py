@@ -181,6 +181,56 @@ def test_reexec_clear_error_when_nothing_has_freqtrade(tmp_path, monkeypatch, ca
     assert "ERROR" in captured.out + captured.err
 
 
+# ------------------------------------------------------- interpreter usability
+def test_is_usable_python_true_for_running_interpreter():
+    assert rt.is_usable_python(sys.executable) is True
+
+
+def test_is_usable_python_false_for_missing_path(tmp_path):
+    assert rt.is_usable_python(tmp_path / "no-such-python") is False
+
+
+def test_is_usable_python_false_for_non_python_file(tmp_path):
+    script = tmp_path / "notpython"
+    script.write_text("this is not executable code\n", encoding="utf-8")
+    assert rt.is_usable_python(script) is False
+
+
+def test_is_usable_python_false_on_nonzero_exit(monkeypatch):
+    import subprocess as sp
+
+    class R:
+        returncode = 3
+        stdout = ""
+        stderr = "Microsoft Store error (simulated)"
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: R())
+    # simulates an invalid Windows Store alias: path exists, execution fails
+    assert rt.is_usable_python("python3") is False
+
+
+def test_is_usable_python_false_on_wrong_output(monkeypatch):
+    import subprocess as sp
+
+    class R:
+        returncode = 0
+        stdout = "unexpected banner\n"
+        stderr = ""
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: R())
+    assert rt.is_usable_python("python3") is False
+
+
+def test_is_usable_python_false_on_timeout(monkeypatch):
+    import subprocess as sp
+
+    def boom(*a, **k):
+        raise sp.TimeoutExpired(cmd="python3", timeout=1)
+
+    monkeypatch.setattr(sp, "run", boom)
+    assert rt.is_usable_python("python3") is False
+
+
 # ------------------------------------------------------------------ environ
 def test_build_runtime_env_sets_pythonpath(fake_repo):
     env = rt.build_runtime_env(fake_repo)

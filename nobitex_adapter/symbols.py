@@ -47,25 +47,34 @@ QUOTE_ASSETS: tuple[str, ...] = (
 # Longest-first so e.g. "USDT" beats shorter ambiguous suffixes deterministically.
 _QUOTE_ORDER = sorted(QUOTE_ASSETS, key=len, reverse=True)
 
+# Wallex (api-docs.wallex.ir) trades concatenated symbols like Nobitex
+# (``BTCUSDT``, ``BTCTMN``) but quotes fiat in Toman (``TMN``) where Nobitex
+# uses ``IRT``/``RLS``. Wallex splitting therefore uses the same known-quote
+# machinery with TMN added; the Nobitex default list is unchanged.
+WALLEX_QUOTE_ASSETS: tuple[str, ...] = QUOTE_ASSETS + ("TMN",)
+_WALLEX_QUOTE_ORDER = sorted(WALLEX_QUOTE_ASSETS, key=len, reverse=True)
+
 
 class SymbolError(ValueError):
     """Raised when a symbol cannot be normalized."""
 
 
-def _split(symbol: str) -> tuple[str, str]:
+def _split(symbol: str, quotes: tuple[str, ...] | None = None) -> tuple[str, str]:
     if not symbol or not isinstance(symbol, str):
         raise SymbolError(f"invalid symbol: {symbol!r}")
     s = symbol.strip().upper()
     if "/" in s:
         base, _, quote = s.partition("/")
         return base.strip(), quote.strip()
-    for quote in _QUOTE_ORDER:
+    order = _QUOTE_ORDER if quotes is None else sorted(quotes, key=len, reverse=True)
+    known = QUOTE_ASSETS if quotes is None else quotes
+    for quote in order:
         if s.endswith(quote) and len(s) > len(quote):
             base = s[: -len(quote)]
             return base, quote
     raise SymbolError(
-        f"cannot detect quote asset in Nobitex symbol {symbol!r} "
-        f"(known quotes: {', '.join(QUOTE_ASSETS)})"
+        f"cannot detect quote asset in symbol {symbol!r} "
+        f"(known quotes: {', '.join(known)})"
     )
 
 
@@ -79,6 +88,28 @@ def freqtrade_to_nobitex(symbol: str) -> str:
     """``BTC/USDT`` -> ``BTCUSDT``."""
     base, _, quote = symbol.partition("/")
     if not base or not quote:
+        raise SymbolError(f"expected BASE/QUOTE freqtrade symbol, got {symbol!r}")
+    return f"{base.strip().upper()}{quote.strip().upper()}"
+
+
+def wallex_to_freqtrade(symbol: str) -> str:
+    """``BTCUSDT``/``BTCTMN`` -> ``BTC/USDT``/``BTC/TMN``.
+
+    Wallex native symbols are concatenated exactly like Nobitex; the only
+    difference is the extra fiat quote ``TMN`` (Toman).
+    """
+    base, quote = _split(symbol, WALLEX_QUOTE_ASSETS)
+    if not base or not quote:
+        raise SymbolError(f"invalid symbol: {symbol!r}")
+    return f"{base}/{quote}"
+
+
+def freqtrade_to_wallex(symbol: str) -> str:
+    """``BTC/USDT`` -> ``BTCUSDT`` (generic BASE/QUOTE -> BASEQUOTE)."""
+    if not isinstance(symbol, str):
+        raise SymbolError(f"invalid symbol: {symbol!r}")
+    base, sep, quote = symbol.partition("/")
+    if not sep or not base.strip() or not quote.strip():
         raise SymbolError(f"expected BASE/QUOTE freqtrade symbol, got {symbol!r}")
     return f"{base.strip().upper()}{quote.strip().upper()}"
 
