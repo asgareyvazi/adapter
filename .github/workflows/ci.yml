@@ -34,7 +34,13 @@ jobs:
             nobitex-$s --help >/dev/null || { echo "nobitex-$s --help failed"; exit 1; }
           done
           test "$(nobitex-doctor --version)" = "nobitex 0.1.0"
-          nobitex-download >/dev/null 2>&1; test $? -eq 2  # argparse wiring
+          if nobitex-download >/dev/null 2>&1; then
+            echo "Expected nobitex-download without arguments to exit 2" >&2
+            exit 1
+          else
+            rc=$?
+            test "$rc" -eq 2
+          fi  # argparse wiring
 
       - name: Non-live test suite
         run: python -m pytest -q
